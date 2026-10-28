@@ -3,20 +3,21 @@ import { SAMPLE_JOBS } from './sampleJobs.js';
 
 const stripHtml = (html) => (html || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
 
-const insertJob = db.prepare(`
-  INSERT INTO jobs (external_id, source, title, company, location, remote, salary, job_type, url, description, tags, posted_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  ON CONFLICT(external_id) DO NOTHING
-`);
+const JOB_COLS = ['external_id', 'source', 'title', 'company', 'location', 'remote', 'salary', 'job_type', 'url', 'description', 'tags', 'posted_at'];
 
-function saveJobs(jobs) {
+/** Inserts jobs in batches (one round trip per 100 jobs), skipping ones already saved. Returns how many were new. */
+async function saveJobs(jobs) {
   let added = 0;
-  for (const j of jobs) {
-    const r = insertJob.run(
+  for (let i = 0; i < jobs.length; i += 100) {
+    const batch = jobs.slice(i, i + 100).filter((j) => j.external_id && j.title && j.company);
+    if (!batch.length) continue;
+    const values = batch.flatMap((j) => [
       j.external_id, j.source, j.title, j.company, j.location || '', j.remote ? 1 : 0, j.salary || '',
       j.job_type || '', j.url || '', (j.description || '').slice(0, 8000), (j.tags || []).join(','), j.posted_at || new Date().toISOString(),
-    );
-    added += Number(r.changes);
+    ]);
+    const row = `(${JOB_COLS.map(() => '?').join(', ')})`;
+    const r = await db.run(`INSERT INTO jobs (${JOB_COLS.join(', ')}) VALUES ${batch.map(() => row).join(', ')} ON CONFLICT (external_id) DO NOTHING`, ...values);
+    added += r.count;
   }
   return added;
 }
@@ -71,16 +72,16 @@ export async function syncJobs(searchTerms = []) {
   const tasks = [['arbeitnow', fromArbeitnow()], ...(searchTerms.length ? searchTerms : ['']).slice(0, 3).map((t) => [`remotive${t ? `:${t}` : ''}`, fromRemotive(t)])];
   for (const [name, p] of tasks) {
     try {
-      const n = saveJobs(await p);
+      const n = await saveJobs(await p);
       results.sources[name] = n;
       results.added += n;
     } catch (e) {
       results.errors.push(`${name}: ${e.message}`);
     }
   }
-  const count = db.prepare('SELECT COUNT(*) AS c FROM jobs').get().c;
+  const { c: count } = await db.get('SELECT COUNT(*) AS c FROM jobs');
   if (count === 0) {
-    results.sources.sample = saveJobs(SAMPLE_JOBS);
+    results.sources.sample = await saveJobs(SAMPLE_JOBS);
     results.added += results.sources.sample;
   }
   return results;
@@ -119,14 +120,14 @@ export function matchScore(job, profile) {
   return Math.round(Math.min(1, titleScore) * 45 + Math.min(1, skillScore) * 40 + locScore * 15);
 }
 
-export function rankedJobsFor(userId, profile, { search = '', limit = 50, onlyNew = false } = {}) {
+export async function rankedJobsFor(userId, profile, { search = '', limit = 50, onlyNew = false } = {}) {
   const like = `%${search}%`;
-  const rows = db.prepare(`
+  const rows = await db.all(`
     SELECT j.*, a.id AS application_id, a.status AS application_status
     FROM jobs j LEFT JOIN applications a ON a.job_id = j.id AND a.user_id = ?
-    WHERE (j.title LIKE ? OR j.company LIKE ? OR j.tags LIKE ?)
-    ORDER BY j.posted_at DESC LIMIT 1000
-  `).all(userId, like, like, like);
+    WHERE (j.title ILIKE ? OR j.company ILIKE ? OR j.tags ILIKE ?)
+    ORDER BY j.posted_at DESC NULLS LAST LIMIT 1000
+  `, userId, like, like, like);
   return rows
     .filter((j) => !onlyNew || !j.application_id)
     .map((j) => ({ ...j, remote: !!j.remote, match_score: matchScore(j, profile) }))

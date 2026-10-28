@@ -210,6 +210,10 @@ label.check.big { font-size: 15px; }
 .auth-hero li { margin: 6px 0; }
 .auth-card { align-self: center; justify-self: center; width: min(400px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 14px; padding: 28px; }
 .auth-card h2 { margin: 0; }
+.auth-card .label-row { display: flex; justify-content: space-between; align-items: baseline; }
+.auth-card .label-row a { font-weight: 400; }
+.notice { background: var(--primary-soft); color: var(--primary); border-radius: 8px; padding: 8px 10px; }
+.auth-card .otp-input { font-size: 24px; letter-spacing: 10px; text-align: center; font-variant-numeric: tabular-nums; }
 
 @media (max-width: 900px) {
   .grid.stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }

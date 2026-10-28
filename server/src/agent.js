@@ -7,21 +7,26 @@ export const setIo = (server) => { io = server; };
 
 const emit = (userId, event, payload) => io?.to(`user:${userId}`).emit(event, payload);
 
-export const getProfile = (userId) => db.prepare('SELECT * FROM profiles WHERE user_id = ?').get(userId);
-export const getApplication = (id, userId) => db.prepare('SELECT * FROM applications WHERE id = ? AND user_id = ?').get(id, userId);
+/** The user's profile, without the stored resume file itself. */
+export async function getProfile(userId) {
+  const row = await db.get('SELECT * FROM profiles WHERE user_id = ?', userId);
+  if (!row) return row;
+  const { resume_data: _file, ...profile } = row;
+  return profile;
+}
+export const getApplication = (id, userId) => db.get('SELECT * FROM applications WHERE id = ? AND user_id = ?', id, userId);
 
-export function logEvent(userId, applicationId, type, message) {
-  const r = db.prepare('INSERT INTO events (user_id, application_id, type, message) VALUES (?, ?, ?, ?)').run(userId, applicationId, type, message);
-  emit(userId, 'event:new', db.prepare('SELECT * FROM events WHERE id = ?').get(r.lastInsertRowid));
+export async function logEvent(userId, applicationId, type, message) {
+  const { rows: [event] } = await db.run('INSERT INTO events (user_id, application_id, type, message) VALUES (?, ?, ?, ?) RETURNING *', userId, applicationId, type, message);
+  emit(userId, 'event:new', event);
 }
 
-export function updateApplication(id, userId, fields) {
+export async function updateApplication(id, userId, fields) {
   const keys = Object.keys(fields);
   if (!keys.length) return getApplication(id, userId);
-  db.prepare(`UPDATE applications SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ? AND user_id = ?`)
-    .run(...keys.map((k) => fields[k]), id, userId);
-  const app = getApplication(id, userId);
-  emit(userId, 'application:update', app);
+  const { rows: [app] } = await db.run(`UPDATE applications SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = now() WHERE id = ? AND user_id = ? RETURNING *`,
+    ...keys.map((k) => fields[k]), id, userId);
+  if (app) emit(userId, 'application:update', app);
   return app;
 }
 
@@ -39,30 +44,30 @@ async function submit(job) {
 
 /** Queue -> tailor cover letter -> submit, emitting each step in real time. */
 export async function applyToJob(userId, jobId, method = 'auto') {
-  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
+  const job = await db.get('SELECT * FROM jobs WHERE id = ?', jobId);
   if (!job) throw new Error('Job not found');
-  const existing = db.prepare('SELECT * FROM applications WHERE user_id = ? AND job_id = ?').get(userId, jobId);
-  if (existing) return existing;
-
-  const user = db.prepare('SELECT id, name, email FROM users WHERE id = ?').get(userId);
-  const profile = getProfile(userId);
-  const r = db.prepare(`INSERT INTO applications (user_id, job_id, title, company, location, url, status, match_score, method)
-    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`).run(userId, jobId, job.title, job.company, job.location, job.url, matchScore(job, profile), method);
-  const id = Number(r.lastInsertRowid);
-  emit(userId, 'application:new', getApplication(id, userId));
-  logEvent(userId, id, 'queued', `Queued ${job.title} at ${job.company}`);
+  const user = await db.get('SELECT id, name, email FROM users WHERE id = ?', userId);
+  const profile = await getProfile(userId);
+  // ON CONFLICT makes double-clicks and overlapping agent runs safe: only one application per job is ever created.
+  const { rows: [created] } = await db.run(`INSERT INTO applications (user_id, job_id, title, company, location, url, status, match_score, method)
+    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?) ON CONFLICT (user_id, job_id) DO NOTHING RETURNING *`,
+    userId, jobId, job.title, job.company, job.location, job.url, matchScore(job, profile), method);
+  if (!created) return db.get('SELECT * FROM applications WHERE user_id = ? AND job_id = ?', userId, jobId);
+  const id = created.id;
+  emit(userId, 'application:new', created);
+  await logEvent(userId, id, 'queued', `Queued ${job.title} at ${job.company}`);
 
   try {
-    updateApplication(id, userId, { status: 'applying' });
+    await updateApplication(id, userId, { status: 'applying' });
     const coverLetter = await generateCoverLetter(job, profile, user);
-    updateApplication(id, userId, { cover_letter: coverLetter });
-    logEvent(userId, id, 'tailored', `Tailored cover letter for ${job.company}`);
+    await updateApplication(id, userId, { cover_letter: coverLetter });
+    await logEvent(userId, id, 'tailored', `Tailored cover letter for ${job.company}`);
     const result = await submit(job, profile, coverLetter);
-    const app = updateApplication(id, userId, { status: 'applied', applied_at: new Date().toISOString(), notes: result.note || '' });
-    logEvent(userId, id, 'applied', `Applied to ${job.title} at ${job.company}`);
+    const app = await updateApplication(id, userId, { status: 'applied', applied_at: new Date().toISOString(), notes: result.note || '' });
+    await logEvent(userId, id, 'applied', `Applied to ${job.title} at ${job.company}`);
     return app;
   } catch (e) {
-    logEvent(userId, id, 'failed', `Failed to apply at ${job.company}: ${e.message}`);
+    await logEvent(userId, id, 'failed', `Failed to apply at ${job.company}: ${e.message}`);
     return updateApplication(id, userId, { status: 'failed', notes: e.message });
   }
 }
@@ -74,12 +79,13 @@ export async function runAgentForUser(userId) {
   if (running.has(userId)) return { skipped: true };
   running.add(userId);
   try {
-    const profile = getProfile(userId);
+    const profile = await getProfile(userId);
     if (!profile) return { applied: 0 };
-    const today = db.prepare(`SELECT COUNT(*) AS c FROM applications WHERE user_id = ? AND method = 'auto' AND date(created_at) = date('now')`).get(userId).c;
+    const { c: today } = await db.get(`SELECT COUNT(*) AS c FROM applications
+      WHERE user_id = ? AND method = 'auto' AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date`, userId);
     const budget = Math.max(0, profile.daily_limit - today);
     if (!budget) return { applied: 0, reason: 'Daily limit reached' };
-    const candidates = rankedJobsFor(userId, profile, { onlyNew: true, limit: 200 })
+    const candidates = (await rankedJobsFor(userId, profile, { onlyNew: true, limit: 200 }))
       .filter((j) => j.match_score >= profile.min_match)
       .slice(0, budget);
     emit(userId, 'agent:status', { running: true, queued: candidates.length });
@@ -98,11 +104,12 @@ export function startAgent({ intervalMs = 60_000, syncEveryMs = 30 * 60_000 } = 
     try {
       if (Date.now() - lastSync > syncEveryMs) {
         lastSync = Date.now();
-        const terms = [...new Set(db.prepare('SELECT titles FROM profiles WHERE auto_apply = 1').all().flatMap((p) => csv(p.titles)))];
+        const terms = [...new Set((await db.all('SELECT titles FROM profiles WHERE auto_apply = 1')).flatMap((p) => csv(p.titles)))];
         const r = await syncJobs(terms);
         console.log(`[jobs] synced +${r.added}`, r.errors.length ? r.errors : '');
       }
-      for (const { user_id } of db.prepare('SELECT user_id FROM profiles WHERE auto_apply = 1').all()) {
+      // Only verified accounts: an unverified sign-up must never trigger applications.
+      for (const { user_id } of await db.all('SELECT p.user_id FROM profiles p JOIN users u ON u.id = p.user_id WHERE p.auto_apply = 1 AND u.verified = 1')) {
         await runAgentForUser(user_id);
       }
     } catch (e) {
