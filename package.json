@@ -1,0 +1,15 @@
+{
+  "name": "yoursjobmate",
+  "private": true,
+  "description": "YoursJobMate: AI job-search co-pilot with auto-apply and a real-time applied-jobs tracker",
+  "scripts": {
+    "setup": "npm install && npm --prefix server install && npm --prefix client install",
+    "dev": "concurrently -n api,web -c blue,magenta \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
+    "build": "npm --prefix client run build",
+    "start": "npm --prefix server start",
+    "test": "npm --prefix server test"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6"
+  }
+}
