@@ -1,30 +1,86 @@
-import { useEffect, useState } from 'react';
-import { api } from '../api';
+import { useCallback, useEffect, useState } from 'react';
+import { api, download } from '../api';
 import { useAuth } from '../App';
+
+const ACCEPT = '.pdf,.docx,.txt,.md';
+
+function ResumeUpload({ p, onUploaded, ats }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [over, setOver] = useState(false);
+
+  const send = async (file) => {
+    if (!file) return;
+    setError('');
+    if (file.size > 5 * 1024 * 1024) return setError('That file is over 5 MB. Please upload a smaller PDF or Word file.');
+    const form = new FormData();
+    form.append('resume', file);
+    setBusy(true);
+    try { onUploaded(await api('/profile/resume', { method: 'POST', form })); } catch (e) { setError(e.message); } finally { setBusy(false); }
+  };
+  const words = (p.resume_text || '').split(/\s+/).filter(Boolean).length;
+  const passed = ats?.checks.filter((c) => c.ok).length ?? 0;
+
+  return (
+    <section className="card form">
+      <div className="row-between">
+        <h3>Your resume</h3>
+        {p.resume_file && <button type="button" className="btn sm ghost" onClick={() => download('/profile/resume', p.resume_file)}>⬇ {p.resume_file}</button>}
+      </div>
+      <label
+        className={`dropzone ${over ? 'over' : ''}`}
+        onDragOver={(e) => { e.preventDefault(); setOver(true); }}
+        onDragLeave={() => setOver(false)}
+        onDrop={(e) => { e.preventDefault(); setOver(false); send(e.dataTransfer.files[0]); }}
+      >
+        <input type="file" accept={ACCEPT} hidden onChange={(e) => { send(e.target.files[0]); e.target.value = ''; }} />
+        <b>{busy ? 'Reading your resume…' : p.resume_file ? 'Upload a new version' : 'Upload your resume'}</b>
+        <span className="muted small">Drag a file here or click to choose. PDF, Word (.docx) or TXT, up to 5 MB.</span>
+      </label>
+      {error && <div className="error">{error}</div>}
+      {words > 0 && (
+        <div className="banner ok small">
+          ✓ We read <b>{words} words</b> from your resume. Open any job on <b>Job Matches</b> to see your ATS score and get a version tailored to it.
+        </div>
+      )}
+      {ats && words > 0 && (
+        <div>
+          <h4 className="ats-title">ATS readiness: {passed} of {ats.checks.length} checks passed</h4>
+          <ul className="checklist">
+            {ats.checks.map((c) => <li key={c.label} className={c.ok ? 'ok' : 'bad'}><span>{c.ok ? '✓' : '!'}</span><div><b>{c.label}</b>{!c.ok && <div className="muted small">{c.tip}</div>}</div></li>)}
+          </ul>
+        </div>
+      )}
+      <details>
+        <summary className="small">Resume text the AI reads{words ? '' : ' (or paste it here instead of uploading)'}</summary>
+        <p className="muted small">If anything was read wrongly, fix it here and click <b>Save changes</b>.</p>
+        <textarea rows={14} value={p.resume_text} onChange={(e) => onUploaded({ ...p, resume_text: e.target.value }, true)} placeholder="Paste your resume text here…" />
+      </details>
+    </section>
+  );
+}
 
 export default function Profile() {
   const { ai } = useAuth();
   const [p, setP] = useState(null);
+  const [ats, setAts] = useState(null);
   const [msg, setMsg] = useState('');
 
-  useEffect(() => { api('/profile').then(setP); }, []);
+  const loadAts = useCallback(() => api('/profile/ats').then(setAts).catch(() => {}), []);
+  useEffect(() => { api('/profile').then(setP); loadAts(); }, [loadAts]);
   if (!p) return <p className="muted">Loading…</p>;
 
   const set = (k, cast = (v) => v) => (e) => setP({ ...p, [k]: cast(e.target.type === 'checkbox' ? (e.target.checked ? 1 : 0) : e.target.value) });
+  const flash = (m) => { setMsg(m); setTimeout(() => setMsg(''), 3000); };
   const save = async (e) => {
     e.preventDefault();
     setP(await api('/profile', { method: 'PUT', body: p }));
-    setMsg('Saved ✓');
-    setTimeout(() => setMsg(''), 2500);
+    loadAts();
+    flash('Saved ✓');
   };
-  const upload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const form = new FormData();
-    form.append('resume', file);
-    const updated = await api('/profile/resume', { method: 'POST', form });
+  const onResume = (updated, localEdit) => {
     setP(updated);
-    setMsg(/\.(txt|md)$/i.test(file.name) ? 'Resume imported ✓' : 'File saved. Paste your resume text below so the AI can use it.');
+    if (!localEdit) { loadAts(); flash('Resume uploaded ✓'); }
   };
 
   return (
@@ -32,10 +88,12 @@ export default function Profile() {
       <div className="page-head">
         <div>
           <h1>Profile & Resume</h1>
-          <p className="muted">This drives job matching, cover letters and the auto-apply agent.</p>
+          <p className="muted">This drives job matching, tailored resumes, cover letters and the auto-apply agent.</p>
         </div>
         <div className="actions">{msg && <span className="muted small">{msg}</span>}<button className="btn primary">Save changes</button></div>
       </div>
+
+      <ResumeUpload p={p} ats={ats} onUploaded={onResume} />
 
       <div className="grid two">
         <section className="card form">
@@ -65,16 +123,10 @@ export default function Profile() {
           <label>Max applications per day<input type="number" min="1" max="100" value={p.daily_limit} onChange={set('daily_limit', Number)} /></label>
           <label>Minimum match score: <b>{p.min_match}%</b><input type="range" min="0" max="100" step="5" value={p.min_match} onChange={set('min_match', Number)} /></label>
         </div>
-        <p className="muted small">Cover letters are written by {ai ? 'Claude (AI)' : 'a built-in template. Set ANTHROPIC_API_KEY on the server for AI-tailored letters'}.</p>
-      </section>
-
-      <section className="card form">
-        <div className="row-between">
-          <h3>Resume</h3>
-          <label className="btn sm">Upload file<input type="file" accept=".pdf,.doc,.docx,.txt,.md" hidden onChange={upload} /></label>
-        </div>
-        {p.resume_file && <p className="muted small">Current file: {p.resume_file}</p>}
-        <textarea rows={12} value={p.resume_text} onChange={set('resume_text')} placeholder="Paste your resume text here…" />
+        <p className="muted small">
+          For every application the agent tailors your resume to the job's ATS keywords and writes a cover letter,
+          using {ai ? 'Claude (AI)' : 'built-in rules. Set ANTHROPIC_API_KEY on the server for AI-written resumes and letters'}.
+        </p>
       </section>
     </form>
   );

@@ -8,7 +8,12 @@ An AI job-search co-pilot, inspired by tools like NextGenApply. You set your pre
 | --- | --- |
 | **Accounts** | Email/password sign-up with a 6-digit email verification code, login, forgot/reset password by email code, sign-out of all sessions on reset, per-IP rate limits |
 | **Profile & resume** | Headline, skills, experience, target titles, locations, remote-only, salary, resume upload or paste |
-| **Job matches** | Live jobs from free public APIs ([Remotive](https://remotive.com/api/remote-jobs), [Arbeitnow](https://www.arbeitnow.com/api/job-board-api)), scored 0–100% against your profile. Bundled sample jobs are used when offline. |
+| **Job matches** | United States jobs only, posted in the last 30 days: 20,000+ at any time from ~270 companies' own career sites (Greenhouse, Lever, Ashby, Workday, SmartRecruiters, Amazon) plus Remote OK, Remotive and The Muse. Optional Adzuna, USAJOBS and JSearch (LinkedIn, Indeed, Glassdoor) keys add more. Closed postings are removed. |
+| **Any company** | Type a company's name in Job Matches (or paste its careers-page link) and its jobs are pulled in and kept updated from then on. |
+| **Apply** | Opens the employer's real application page in a new tab, and records the job in Applied Jobs with a tailored resume and cover letter prepared. |
+| **24/7 updates** | A GitHub Action (`.github/workflows/sync-jobs.yml`) refreshes jobs every 30 minutes, even when your computer or server is off. |
+| **Search & filters** | Keyword search plus LinkedIn-style filters with live counts: date posted (24 hours to 1 month), company, US state, remote. Sort by newest or best match. Filters live in the URL, so they survive a refresh and can be bookmarked. |
+| **Saved jobs** | Save any job, then tailor your resume and apply to all saved jobs with one click. |
 | **AI cover letters** | Claude writes a letter per job from your resume and the job description. A template is used if no API key is set. |
 | **Auto-apply agent** | A background worker that applies to new jobs above your minimum match score, up to your daily limit |
 | **Applied Jobs page** | Status tabs with counts, search, filter by method, sort, inline status changes, notes, a per-application timeline, CSV export, and manual entries for jobs you applied to elsewhere |
@@ -33,7 +38,10 @@ server/src/
   db.js            PostgreSQL connection and schema
 server/scripts/
   migrate-sqlite.js  One-time copy of an old SQLite database into PostgreSQL
-  jobs.js          Job sources, sync and match scoring
+  jobs.js          Job sync (US only, last 30 days), search filters and match scoring
+  sources.js       Job sources: Greenhouse, Lever, Ashby, Remote OK, Remotive, The Muse, Adzuna, USAJOBS, JSearch
+  companies.js     The company career boards that are pulled
+  usLocation.js    Reads job locations: US or not, which states, remote
   agent.js         Auto-apply pipeline: queue → tailor → submit → track
   ai.js            Claude cover-letter generation
 server/test/       API tests (node:test)
@@ -143,6 +151,16 @@ NODE_ENV=production npm start
 ### Scaling beyond one server
 
 The database already supports many server instances. The remaining single-instance pieces are the in-memory rate limits, Socket.IO live updates and the auto-apply loop: before running several instances behind a load balancer, move rate limits and Socket.IO state to Redis and run the agent as a separate worker (see the roadmap).
+
+## Keeping jobs fresh 24/7
+
+The web server refreshes jobs every hour while it runs. To refresh them around the clock, even while your computer or server is off, use the included GitHub Action:
+
+1. Push this repository to GitHub.
+2. In the repository, open **Settings → Secrets and variables → Actions → New repository secret**. Name it `DATABASE_URL` and paste the same connection string as in `server/.env`. Optionally add `ADZUNA_APP_ID`, `ADZUNA_APP_KEY`, `USAJOBS_API_KEY`, `USAJOBS_EMAIL` and `JSEARCH_API_KEY`.
+3. Open the **Actions** tab, choose **Sync jobs**, and click **Run workflow** to test it. After that it runs every 30 minutes by itself, and each run's log shows how many jobs were added and removed.
+
+When the Action is running, you can set `SYNC_EVERY_MS=0` on the web server so it doesn't sync too. To sync once by hand: `cd server && npm run sync:jobs`.
 
 ## Tests
 

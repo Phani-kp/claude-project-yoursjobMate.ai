@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { rateLimit } from 'express-rate-limit';
 import { db } from './db.js';
 import { checkPassword, hashPassword, hmac, signToken } from './auth.js';
-import { sendPasswordChangedEmail, sendPasswordResetEmail, sendVerificationEmail } from './mailer.js';
+import { mailEnabled, sendPasswordChangedEmail, sendPasswordResetEmail, sendVerificationEmail } from './mailer.js';
 
 const OTP_TTL_MINUTES = 10;
 const OTP_RESEND_SECONDS = 60;
@@ -24,9 +24,22 @@ const passwordError = (p) =>
   : null;
 
 const safeEqual = (a, b) => a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
-const otpCooldown = (u) => Math.max(0, Math.ceil(((u.otp_sent_at || 0) + OTP_RESEND_SECONDS * 1000 - Date.now()) / 1000));
+/** Seconds until another code of this purpose may be sent. Only a pending, unused code of the same purpose blocks it. */
+const otpCooldown = (u, purpose) => (u.otp_purpose !== purpose ? 0
+  : Math.max(0, Math.ceil(((u.otp_sent_at || 0) + OTP_RESEND_SECONDS * 1000 - Date.now()) / 1000)));
+
+// Development only (no email service): the latest code per user, so it can be shown on screen again while the
+// resend cooldown is running. Production never keeps codes, because it can't start without email.
+const devCodes = new Map();
+const pendingDevCode = (u, purpose) => (u.otp_purpose === purpose ? devCodes.get(`${u.id}:${purpose}`) : undefined);
+/** Sends a new code unless one of this purpose was sent within the last minute. Returns the code only in development. */
+const sendOtpIfAllowed = async (u, purpose) => (otpCooldown(u, purpose) === 0 ? issueOtp(u, purpose) : pendingDevCode(u, purpose));
 const otpHash = (userId, purpose, code) => hmac(`${userId}:${purpose}:${code}`);
 
+/**
+ * Creates and emails a one-time code. Returns the code itself only when no email service is configured, which the
+ * server allows in development only (production refuses to start without SMTP), so it can be shown on screen.
+ */
 async function issueOtp(user, purpose) {
   const code = String(crypto.randomInt(100000, 1000000));
   const now = Date.now();
@@ -40,6 +53,9 @@ async function issueOtp(user, purpose) {
     await db.run('UPDATE users SET otp_sent_at = NULL WHERE id = ?', user.id);
     throw Object.assign(new Error("We couldn't send the email. Please try again in a moment."), { status: 502, expose: true });
   }
+  if (mailEnabled()) return undefined;
+  devCodes.set(`${user.id}:${purpose}`, code);
+  return code;
 }
 
 /** Checks a submitted code. Returns an error response body, or null if the code is correct (and consumes it). */
@@ -52,6 +68,7 @@ async function checkOtp(user, purpose, code) {
     return { status: 400, error: left > 0 ? `Incorrect code. ${left} attempt${left === 1 ? '' : 's'} left.` : 'Too many wrong attempts. Request a new code.' };
   }
   await db.run('UPDATE users SET otp_hash = NULL, otp_purpose = NULL, otp_expires_at = NULL, otp_attempts = 0 WHERE id = ?', user.id);
+  devCodes.delete(`${user.id}:${purpose}`);
   return null;
 }
 
@@ -99,8 +116,8 @@ export function authRouter() {
       }
     }
     const user = await getUser(id);
-    if (otpCooldown(user) === 0) await issueOtp(user, 'verify');
-    res.status(201).json({ needsVerification: true, email, retryAfter: otpCooldown(await getUser(id)) });
+    const devCode = await sendOtpIfAllowed(user, 'verify');
+    res.status(201).json({ needsVerification: true, email, retryAfter: otpCooldown(await getUser(id), 'verify'), devCode });
   }));
 
   r.post('/verify', normal, wrap(async (req, res) => {
@@ -115,10 +132,10 @@ export function authRouter() {
   r.post('/resend-otp', strict, wrap(async (req, res) => {
     const user = await findUser(req.body?.email);
     if (!user || user.verified) return res.status(400).json({ error: 'This email is already verified or has no pending sign-up. Try logging in.' });
-    const wait = otpCooldown(user);
+    const wait = otpCooldown(user, 'verify');
     if (wait) return res.status(429).json({ error: `Please wait ${wait}s before requesting another code`, retryAfter: wait });
-    await issueOtp(user, 'verify');
-    res.json({ ok: true, retryAfter: OTP_RESEND_SECONDS });
+    const devCode = await issueOtp(user, 'verify');
+    res.json({ ok: true, retryAfter: OTP_RESEND_SECONDS, devCode });
   }));
 
   r.post('/login', strict, wrap(async (req, res) => {
@@ -129,8 +146,8 @@ export function authRouter() {
     // Upgrade hashes created before the password pepper existed.
     if (check.needsRehash) await db.run('UPDATE users SET password_hash = ? WHERE id = ?', await hashPassword(password), user.id);
     if (!user.verified) {
-      if (otpCooldown(user) === 0) await issueOtp(user, 'verify');
-      return res.status(403).json({ error: 'Please verify your email first. We sent you a code.', needsVerification: true, email: user.email, retryAfter: otpCooldown(await getUser(user.id)) });
+      const devCode = await sendOtpIfAllowed(user, 'verify');
+      return res.status(403).json({ error: 'Please verify your email first. We sent you a code.', needsVerification: true, email: user.email, retryAfter: otpCooldown(await getUser(user.id), 'verify'), devCode });
     }
     res.json({ token: signToken(user), user: publicUser(user) });
   }));
@@ -138,8 +155,8 @@ export function authRouter() {
   // Always answers the same way, so it can't be used to find out who has an account.
   r.post('/forgot-password', strict, wrap(async (req, res) => {
     const user = await findUser(req.body?.email);
-    if (user && otpCooldown(user) === 0) await issueOtp(user, 'reset');
-    res.json({ ok: true, retryAfter: OTP_RESEND_SECONDS });
+    const devCode = user ? await sendOtpIfAllowed(user, 'reset') : undefined;
+    res.json({ ok: true, retryAfter: OTP_RESEND_SECONDS, devCode });
   }));
 
   r.post('/reset-password', normal, wrap(async (req, res) => {

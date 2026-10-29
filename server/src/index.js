@@ -27,6 +27,14 @@ app.set('io', io);
 setIo(io);
 
 let agentTimer;
+server.on('error', (err) => {
+  if (err.code !== 'EADDRINUSE') throw err;
+  console.error(`
+Port ${PORT} is already in use, probably by another copy of this server that is still running.
+Stop it (Ctrl+C in its terminal, or close that terminal), then start again. Or set PORT to a different number.
+`);
+  process.exit(1);
+});
 server.listen(PORT, () => {
   console.log(`YoursJobMate API on http://localhost:${PORT} (${process.env.NODE_ENV || 'development'}, database: ${db.kind === 'postgres' ? 'PostgreSQL' : 'embedded Postgres (local dev)'})`);
   verifyMailer();

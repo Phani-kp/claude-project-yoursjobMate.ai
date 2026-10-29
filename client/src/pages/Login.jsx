@@ -5,6 +5,26 @@ import { useAuth } from '../App';
 
 const RESEND_SECONDS = 60;
 const PASSWORD_MIN = 8;
+// The server only sends the code back when it has no email service (development).
+function DevCode({ code }) {
+  return (
+    <div className="notice dev-code" role="status">
+      Email sending isn't set up on this server yet, so no email was sent. Your code is:{' '}
+      <strong>{code}</strong>
+    </div>
+  );
+}
+
+/** Password box with a Show/Hide toggle, so autofilled passwords can be checked. */
+function PasswordInput(props) {
+  const [show, setShow] = useState(false);
+  return (
+    <span className="password-field">
+      <input {...props} type={show ? 'text' : 'password'} />
+      <button type="button" className="btn ghost sm" onClick={() => setShow((v) => !v)} aria-label={show ? 'Hide password' : 'Show password'}>{show ? 'Hide' : 'Show'}</button>
+    </span>
+  );
+}
 
 function CodeInput({ value, onChange }) {
   return (
@@ -35,6 +55,7 @@ export default function Login() {
   const [cooldown, setCooldown] = useState(0);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [devCode, setDevCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [dest, setDest] = useState('/');
 
@@ -46,7 +67,7 @@ export default function Login() {
 
   if (user) return <Navigate to={dest} replace />;
 
-  const go = (m, { keepNotice = false } = {}) => { setMode(m); setError(''); if (!keepNotice) setNotice(''); setCode(''); };
+  const go = (m, { keepNotice = false } = {}) => { setMode(m); setError(''); if (!keepNotice) setNotice(''); setCode(''); setDevCode(''); };
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
 
   const run = (fn) => async (e) => {
@@ -60,6 +81,7 @@ export default function Login() {
     setCooldown(data.retryAfter ?? RESEND_SECONDS);
     setDest(fromSignup ? '/profile' : '/');
     go('verify');
+    setDevCode(data.devCode || '');
   };
 
   const submit = run(async () => {
@@ -79,7 +101,8 @@ export default function Login() {
   const resendVerify = run(async () => {
     const data = await api('/auth/resend-otp', { method: 'POST', body: { email: pendingEmail } });
     setCooldown(data.retryAfter || RESEND_SECONDS);
-    setNotice('A new code is on its way.');
+    setDevCode(data.devCode || '');
+    setNotice(data.devCode ? '' : 'A new code is on its way.');
   });
 
   const requestReset = run(async () => {
@@ -87,8 +110,9 @@ export default function Login() {
     const data = await api('/auth/forgot-password', { method: 'POST', body: { email } });
     setPendingEmail(email);
     setCooldown(data.retryAfter || RESEND_SECONDS);
-    setNotice(`If an account exists for ${email}, we've sent it a reset code.`);
+    setNotice(data.devCode ? '' : `If an account exists for ${email}, we've sent it a reset code.`);
     if (mode !== 'reset') go('reset', { keepNotice: true });
+    setDevCode(data.devCode || '');
   });
 
   const reset = run(async () => {
@@ -108,7 +132,7 @@ export default function Login() {
     card = (
       <form className="card auth-card" onSubmit={verify}>
         <h2>Check your email</h2>
-        <p className="muted small">We sent a 6-digit code to <strong>{pendingEmail}</strong>. It expires in 10 minutes.</p>
+        {devCode ? <DevCode code={devCode} /> : <p className="muted small">We sent a 6-digit code to <strong>{pendingEmail}</strong>. It expires in 10 minutes.</p>}
         <CodeInput value={code} onChange={setCode} />
         {messages}
         <button className="btn primary" disabled={busy || code.length !== 6}>{busy ? 'Verifying…' : 'Verify email'}</button>
@@ -131,9 +155,9 @@ export default function Login() {
     card = (
       <form className="card auth-card" onSubmit={reset}>
         <h2>Set a new password</h2>
-        <p className="muted small">Enter the code we emailed to <strong>{pendingEmail}</strong> and choose a new password.</p>
+        {devCode ? <DevCode code={devCode} /> : <p className="muted small">Enter the code we emailed to <strong>{pendingEmail}</strong> and choose a new password.</p>}
         <CodeInput value={code} onChange={setCode} />
-        <label>New password<input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} minLength={PASSWORD_MIN} maxLength={128} autoComplete="new-password" required /></label>
+        <label>New password<PasswordInput value={newPassword} onChange={(e) => setNewPassword(e.target.value)} minLength={PASSWORD_MIN} maxLength={128} autoComplete="new-password" required /></label>
         {messages}
         <button className="btn primary" disabled={busy || code.length !== 6}>{busy ? 'Saving…' : 'Reset password and log in'}</button>
         <p className="muted small">Didn't get it? Check your spam folder or {resendLink(requestReset)}.</p>
@@ -151,10 +175,13 @@ export default function Login() {
           <span className="label-row">Password
             {!signup && <a href="#" className="small" onClick={(e) => { e.preventDefault(); setPendingEmail(''); go('forgot'); }}>Forgot password?</a>}
           </span>
-          <input type="password" value={form.password} onChange={set('password')} minLength={signup ? PASSWORD_MIN : undefined} maxLength={128} autoComplete={signup ? 'new-password' : 'current-password'} required />
+          <PasswordInput value={form.password} onChange={set('password')} minLength={signup ? PASSWORD_MIN : undefined} maxLength={128} autoComplete={signup ? 'new-password' : 'current-password'} required />
           {signup && <span className="muted small">At least {PASSWORD_MIN} characters</span>}
         </label>
         {messages}
+        {!signup && error === 'Invalid email or password' && (
+          <p className="muted small">Your browser may have filled in an old saved password. Click <b>Show</b> to check it, or use <b>Forgot password?</b> to set a new one.</p>
+        )}
         <button className="btn primary" disabled={busy}>{busy ? 'Please wait…' : signup ? 'Sign up' : 'Log in'}</button>
         <p className="muted small">
           {signup ? 'Already have an account? ' : "Don't have an account? "}

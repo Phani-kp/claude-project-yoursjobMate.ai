@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { api, fmtDate, STATUSES, timeAgo } from '../api';
 import { useLive } from '../useLive';
 import { MatchBadge, Modal, Stat, StatusBadge } from '../components';
+import ResumeTailor from '../ResumeTailor';
 
 const TABS = ['all', 'applied', 'viewed', 'interview', 'offer', 'rejected', 'queued', 'failed'];
 
@@ -153,6 +154,7 @@ function Detail({ app, onClose, onRemove }) {
         {app.method !== 'manual' && <MatchBadge score={app.match_score} />}
         <span className="muted small">{app.location} · Applied {fmtDate(app.applied_at)} · via {app.method}</span>
       </div>
+      {app.job_id && (<><h4>Resume for this job</h4><ResumeTailor jobId={app.job_id} /></>)}
       {app.cover_letter && (<><h4>Cover letter sent</h4><pre className="letter">{app.cover_letter}</pre></>)}
       <h4>Notes</h4>
       <textarea rows={3} value={notes} onChange={(e) => { setNotes(e.target.value); setSaved(false); }} placeholder="Recruiter name, interview dates, follow-ups…" />

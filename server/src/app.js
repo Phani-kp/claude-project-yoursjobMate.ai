@@ -5,12 +5,15 @@ import multer from 'multer';
 import fs from 'node:fs';
 import path from 'node:path';
 import { rateLimit } from 'express-rate-limit';
-import { db, STATUSES } from './db.js';
+import { csv, db, STATUSES } from './db.js';
 import { requireAuth } from './auth.js';
 import { authRouter, publicUser } from './authRoutes.js';
-import { rankedJobsFor, syncJobs } from './jobs.js';
+import { getJob, jobFacets, matchScore, parseFilters, searchJobs, syncBoards, syncJobs, withFit } from './jobs.js';
+import { discoverBoards, parseBoardUrl, verifyBoard } from './sources.js';
+import { ATS_LABELS, builtInBoards } from './companies.js';
 import { aiEnabled } from './ai.js';
-import { applyToJob, getApplication, getProfile, logEvent, runAgentForUser, updateApplication } from './agent.js';
+import { applySavedJobs, applyToJob, getApplication, getProfile, getTailoredResume, logEvent, runAgentForUser, tailorForJob, updateApplication } from './agent.js';
+import { atsReport, detectResumeProfile, extractResumeText, resumeToDocx, resumeToText } from './resume.js';
 
 // Resumes are kept in the database (not on the server's disk), so every server instance sees them.
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -20,6 +23,8 @@ const NUMERIC_FIELDS = new Set(['remote_only', 'experience_years', 'min_salary',
 const APP_EDITABLE = ['status', 'notes', 'title', 'company', 'location', 'url'];
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+const fileSafe = (s) => String(s || '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 40) || 'resume';
+const withText = (t) => t && { ...t, text: resumeToText(t.resume) };
 const toNumber = (v) => (typeof v === 'boolean' ? Number(v) : Math.trunc(Number(v)) || 0);
 
 export function createApp() {
@@ -54,7 +59,10 @@ export function createApp() {
   }));
 
   // ---- Profile / preferences ----
-  app.get('/api/profile', wrap(async (req, res) => res.json(await getProfile(req.user.id))));
+  app.get('/api/profile', wrap(async (req, res) => {
+    const p = await getProfile(req.user.id);
+    res.json({ ...p, detected: detectResumeProfile(p.resume_text || '', p) });
+  }));
 
   app.put('/api/profile', wrap(async (req, res) => {
     const body = req.body || {};
@@ -67,11 +75,16 @@ export function createApp() {
 
   app.post('/api/profile/resume', upload.single('resume'), wrap(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    const isText = /\.(txt|md)$/i.test(req.file.originalname) || req.file.mimetype.startsWith('text/');
-    const update = { resume_file: req.file.originalname.slice(0, 255), resume_mime: req.file.mimetype, resume_data: req.file.buffer };
-    if (isText) update.resume_text = req.file.buffer.toString('utf8').slice(0, 20000);
+    // PDF, Word and text resumes are read into resume_text, which matching, cover letters and tailoring use.
+    const text = await extractResumeText(req.file.buffer, req.file.originalname, req.file.mimetype);
+    const update = { resume_file: req.file.originalname.slice(0, 255), resume_mime: req.file.mimetype, resume_data: req.file.buffer, resume_text: text };
     await db.run(`UPDATE profiles SET ${Object.keys(update).map((k) => `${k} = ?`).join(', ')} WHERE user_id = ?`, ...Object.values(update), req.user.id);
     res.json(await getProfile(req.user.id));
+  }));
+
+  app.get('/api/profile/ats', wrap(async (req, res) => {
+    const { resume_text: text } = await getProfile(req.user.id);
+    res.json(atsReport(text));
   }));
 
   app.get('/api/profile/resume', wrap(async (req, res) => {
@@ -81,14 +94,113 @@ export function createApp() {
   }));
 
   // ---- Jobs ----
+  // US jobs from the last 30 days. Filters: q, posted (1|3|7|14|30 days), company, state (2-letter or REMOTE; repeat
+  // or separate with |), remote=1, onlyNew=1, sort (recent|match), offset, limit.
   app.get('/api/jobs', wrap(async (req, res) => {
     const profile = await getProfile(req.user.id);
-    res.json(await rankedJobsFor(req.user.id, profile, { search: String(req.query.search || ''), limit: Math.min(Number(req.query.limit) || 50, 200), onlyNew: req.query.onlyNew === '1' }));
+    res.json(await searchJobs(req.user.id, profile, withFit(parseFilters(req.query), profile)));
   }));
 
-  app.post('/api/jobs/sync', wrap(async (req, res) => {
+  app.get('/api/jobs/facets', wrap(async (req, res) => {
     const profile = await getProfile(req.user.id);
-    res.json(await syncJobs((profile.titles || '').split(',').map((s) => s.trim()).filter(Boolean)));
+    const f = withFit(parseFilters(req.query), profile);
+    res.json({ ...(await jobFacets(req.user.id, f)), detected: detectResumeProfile(profile.resume_text || '', profile) });
+  }));
+
+  const syncLimit = rateLimit({ windowMs: 5 * 60_000, limit: 3, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Jobs were refreshed a moment ago. Please try again in a few minutes.' } });
+  app.post('/api/jobs/sync', syncLimit, wrap(async (req, res) => {
+    const profile = await getProfile(req.user.id);
+    res.json(await syncJobs(csv(profile.titles).map((t) => t.toLowerCase())));
+  }));
+
+  // ---- Companies: add any company's career site, by name or by link ----
+  const discoverLimit = rateLimit({ windowMs: 10 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Too many company searches. Please wait a few minutes.' } });
+  app.post('/api/companies/discover', discoverLimit, wrap(async (req, res) => {
+    const input = String(req.body?.query || '').trim().slice(0, 300);
+    if (input.length < 2) return res.status(400).json({ error: 'Enter a company name or a careers-page link' });
+    const fromLink = parseBoardUrl(input);
+    let boards;
+    if (fromLink) {
+      const existing = builtInBoards().find((b) => b.ats === fromLink.ats && b.token === fromLink.token);
+      const name = String(req.body?.name || '').trim() || existing?.name || fromLink.token.split('|')[0].replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+      const counts = await verifyBoard({ ...fromLink, name }).catch(() => ({ jobs: 0, recent: 0 }));
+      boards = counts.jobs ? [{ ...fromLink, name, ...counts }] : [];
+    } else if (/^https?:\/\/|\.[a-z]{2,}\//i.test(input)) {
+      return res.status(400).json({ error: "That link isn't a Greenhouse, Lever, Ashby, Workday, SmartRecruiters or Workable careers page. Open the company's job list and copy the link from there." });
+    } else {
+      // "hugging face" → "Hugging Face"; names typed with capitals are kept as typed.
+      const pretty = input === input.toLowerCase() ? input.replace(/\b\w/g, (c) => c.toUpperCase()) : input;
+      boards = await discoverBoards(pretty);
+    }
+    // Use the built-in name when the company is already listed.
+    for (const b of boards) b.name = builtInBoards().find((x) => x.ats === b.ats && x.token === b.token)?.name || b.name;
+    if (!boards.length) return res.json({ found: [], message: `We couldn't find a public job board for "${input}". Paste the link to its careers page instead (the page that lists its open jobs).` });
+    for (const b of boards) await db.run('INSERT INTO company_boards (ats, token, name, added_by) VALUES (?, ?, ?, ?) ON CONFLICT (ats, token) DO NOTHING', b.ats, b.token, b.name, req.user.id);
+    // Pull just these boards now, so their jobs show up straight away.
+    const synced = await syncBoards(boards);
+    res.json({ found: boards.map((b) => ({ ...b, platform: ATS_LABELS[b.ats] })), synced });
+  }));
+
+  // ---- Saved jobs ----
+  app.get('/api/saved', wrap(async (req, res) => {
+    const rows = await db.all(`SELECT j.id, j.title, j.company, j.location, j.city, j.states, j.remote, j.salary, j.url, j.source, j.posted_ts AS posted_at, s.created_at AS saved_at,
+        a.id AS application_id, a.status AS application_status, t.ats_before, t.ats_after
+      FROM saved_jobs s JOIN jobs j ON j.id = s.job_id
+      LEFT JOIN applications a ON a.job_id = j.id AND a.user_id = s.user_id
+      LEFT JOIN tailored_resumes t ON t.job_id = j.id AND t.user_id = s.user_id
+      WHERE s.user_id = ? ORDER BY s.created_at DESC`, req.user.id);
+    res.json(rows.map((r) => ({ ...r, remote: !!r.remote, saved: true, states: (r.states || '').split(',').filter(Boolean) })));
+  }));
+
+  app.post('/api/saved/apply-all', wrap(async (req, res) => {
+    const { resume_text: text } = await getProfile(req.user.id);
+    if ((text || '').trim().length < 50) return res.status(400).json({ error: 'Upload your resume on the Profile page first, so each application gets a tailored resume.' });
+    const r = await applySavedJobs(req.user.id);
+    if (r.busy) return res.status(409).json({ error: 'Applications are already being prepared. Watch the progress on Applied Jobs.' });
+    res.status(202).json(r);
+  }));
+
+  app.put('/api/jobs/:id/save', wrap(async (req, res) => {
+    const id = toNumber(req.params.id);
+    if (!(await db.get('SELECT id FROM jobs WHERE id = ?', id))) return res.status(404).json({ error: 'Job not found' });
+    await db.run('INSERT INTO saved_jobs (user_id, job_id) VALUES (?, ?) ON CONFLICT DO NOTHING', req.user.id, id);
+    res.json({ saved: true });
+  }));
+
+  app.delete('/api/jobs/:id/save', wrap(async (req, res) => {
+    await db.run('DELETE FROM saved_jobs WHERE user_id = ? AND job_id = ?', req.user.id, toNumber(req.params.id));
+    res.json({ saved: false });
+  }));
+
+  app.get('/api/jobs/:id', wrap(async (req, res) => {
+    const job = await getJob(req.user.id, toNumber(req.params.id));
+    if (!job) return res.status(404).json({ error: 'This job is no longer available' });
+    res.json({ ...job, match_score: matchScore(job, await getProfile(req.user.id)) });
+  }));
+
+  // ---- ATS check and tailored resume for one job ----
+  app.get('/api/jobs/:id/ats', wrap(async (req, res) => {
+    const job = await db.get('SELECT * FROM jobs WHERE id = ?', toNumber(req.params.id));
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const { resume_text: text } = await getProfile(req.user.id);
+    res.json({ hasResume: (text || '').trim().length >= 50, ...atsReport(text, job), tailored: withText(await getTailoredResume(req.user.id, job.id)) || null });
+  }));
+
+  const tailorLimit = rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'You have tailored a lot of resumes recently. Please wait a few minutes.' } });
+  app.post('/api/jobs/:id/tailor', tailorLimit, wrap(async (req, res) => {
+    const list = (v) => (Array.isArray(v) ? v.slice(0, 30).map(String) : []);
+    const confirmed = list(req.body?.confirmedSkills);
+    const learning = list(req.body?.learningSkills);
+    res.json(withText(await tailorForJob(req.user.id, toNumber(req.params.id), confirmed, learning)));
+  }));
+
+  app.get('/api/jobs/:id/tailor/docx', wrap(async (req, res) => {
+    const t = await getTailoredResume(req.user.id, toNumber(req.params.id));
+    if (!t) return res.status(404).json({ error: 'Tailor your resume for this job first' });
+    const job = await db.get('SELECT company FROM jobs WHERE id = ?', t.job_id);
+    res.type('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+      .attachment(`${fileSafe(t.resume.name)}-Resume-${fileSafe(job?.company)}.docx`)
+      .send(await resumeToDocx(t.resume));
   }));
 
   app.post('/api/jobs/:id/apply', wrap(async (req, res) => {
