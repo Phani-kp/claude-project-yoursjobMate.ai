@@ -4,6 +4,7 @@ import { api, closeSocket, getSocket, getToken, setToken } from './api';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Jobs from './pages/Jobs';
+import SavedJobs from './pages/SavedJobs';
 import AppliedJobs from './pages/AppliedJobs';
 import Profile from './pages/Profile';
 
@@ -48,6 +49,7 @@ function Shell() {
   const nav = [
     ['/', 'Dashboard', '◧'],
     ['/jobs', 'Job Matches', '⌕'],
+    ['/saved', 'Saved Jobs', '★'],
     ['/applied-jobs', 'Applied Jobs', '✓'],
     ['/profile', 'Profile & Resume', '☺'],
   ];
@@ -89,6 +91,7 @@ export default function App() {
           <Route element={<Shell />}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/jobs" element={<Jobs />} />
+            <Route path="/saved" element={<SavedJobs />} />
             <Route path="/applied-jobs" element={<AppliedJobs />} />
             <Route path="/profile" element={<Profile />} />
           </Route>

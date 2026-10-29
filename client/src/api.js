@@ -18,6 +18,19 @@ export async function api(path, { method = 'GET', body, form } = {}) {
   return data;
 }
 
+/** Downloads a file from an authenticated endpoint, using the server's filename. */
+export async function download(path, fallbackName) {
+  const res = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${getToken() || ''}` } });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Download failed (${res.status})`);
+  const name = res.headers.get('Content-Disposition')?.match(/filename="?([^";]+)"?/)?.[1] || fallbackName;
+  const url = URL.createObjectURL(await res.blob());
+  const a = Object.assign(document.createElement('a'), { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 let socket = null;
 export function getSocket() {
   if (!socket) socket = io({ auth: { token: getToken() }, transports: ['websocket', 'polling'] });

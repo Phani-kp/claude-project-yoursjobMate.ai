@@ -1,4 +1,4 @@
-// Fictional demo listings used only when the public job APIs can't be reached (e.g. offline dev).
+// Fictional listings used by the automated tests only. They are never shown to users.
 const companies = ['Acme Cloud', 'Nimbus Labs', 'BrightPath Health', 'Orbit Fintech', 'Lumen Analytics', 'Northwind Retail', 'Quanta AI', 'Bluefin Logistics'];
 const roles = [
   ['Frontend Engineer', ['react', 'typescript', 'css', 'javascript']],
@@ -11,7 +11,7 @@ const roles = [
   ['QA Automation Engineer', ['selenium', 'playwright', 'javascript', 'ci']],
   ['Java Developer', ['java', 'spring', 'microservices', 'sql']],
 ];
-const locations = [['Remote', true], ['New York, NY', false], ['Austin, TX', false], ['Remote (US)', true], ['San Francisco, CA', false], ['Hyderabad, India', false], ['Bengaluru, India', false], ['London, UK', false]];
+const locations = [['Remote (US)', true], ['New York, NY', false], ['Austin, TX', false], ['Seattle, WA', false], ['San Francisco, CA', false], ['Chicago, IL', false], ['Boston, MA', false], ['Denver, CO', false]];
 
 export const SAMPLE_JOBS = roles.flatMap(([title, tags], i) =>
   [0, 1, 2].map((k) => {

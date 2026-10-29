@@ -1,6 +1,7 @@
 import { db, csv } from './db.js';
-import { matchScore, rankedJobsFor, syncJobs } from './jobs.js';
-import { generateCoverLetter } from './ai.js';
+import { ensureJobDetails, matchScore, rankedJobsFor, syncJobs } from './jobs.js';
+import { AI_MODEL, aiClient, generateCoverLetter } from './ai.js';
+import { tailorResume } from './resume.js';
 
 let io = null;
 export const setIo = (server) => { io = server; };
@@ -30,6 +31,32 @@ export async function updateApplication(id, userId, fields) {
   return app;
 }
 
+const parseTailored = (row) => row && { ...row, ai: !!row.ai, resume: JSON.parse(row.resume), changes: JSON.parse(row.changes), report: JSON.parse(row.report) };
+
+export const getTailoredResume = async (userId, jobId) =>
+  parseTailored(await db.get('SELECT * FROM tailored_resumes WHERE user_id = ? AND job_id = ?', userId, jobId));
+
+/**
+ * Creates (or replaces) the user's ATS-tailored resume for a job and saves it.
+ * confirmedSkills: missing job keywords the user has confirmed they really have.
+ * learningSkills: missing job keywords the user is actively learning (listed under Professional Development).
+ */
+export async function tailorForJob(userId, jobId, confirmedSkills = [], learningSkills = []) {
+  await ensureJobDetails(jobId);
+  const job = await db.get('SELECT * FROM jobs WHERE id = ?', jobId);
+  if (!job) throw Object.assign(new Error('Job not found'), { status: 404, expose: true });
+  const user = await db.get('SELECT id, name, email FROM users WHERE id = ?', userId);
+  const profile = await getProfile(userId);
+  const t = await tailorResume({ resumeText: profile.resume_text, profile, user, job, aiClient, model: AI_MODEL, confirmedSkills, learningSkills });
+  const report = { before: t.before, after: t.after, gap: t.gap, removed: t.removed };
+  const { rows: [row] } = await db.run(`INSERT INTO tailored_resumes (user_id, job_id, resume, changes, ats_before, ats_after, report, ai)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (user_id, job_id) DO UPDATE SET resume = EXCLUDED.resume, changes = EXCLUDED.changes, ats_before = EXCLUDED.ats_before,
+      ats_after = EXCLUDED.ats_after, report = EXCLUDED.report, ai = EXCLUDED.ai, created_at = now()
+    RETURNING *`, userId, jobId, JSON.stringify(t.resume), JSON.stringify(t.changes), t.before.score, t.after.score, JSON.stringify(report), t.ai ? 1 : 0);
+  return parseTailored(row);
+}
+
 /**
  * Submits the application to the employer.
  * APPLY_MODE=simulate (default) records the application and prepared materials without contacting the employer.
@@ -44,6 +71,7 @@ async function submit(job) {
 
 /** Queue -> tailor cover letter -> submit, emitting each step in real time. */
 export async function applyToJob(userId, jobId, method = 'auto') {
+  await ensureJobDetails(jobId);
   const job = await db.get('SELECT * FROM jobs WHERE id = ?', jobId);
   if (!job) throw new Error('Job not found');
   const user = await db.get('SELECT id, name, email FROM users WHERE id = ?', userId);
@@ -62,6 +90,11 @@ export async function applyToJob(userId, jobId, method = 'auto') {
     const coverLetter = await generateCoverLetter(job, profile, user);
     await updateApplication(id, userId, { cover_letter: coverLetter });
     await logEvent(userId, id, 'tailored', `Tailored cover letter for ${job.company}`);
+    if ((profile.resume_text || '').trim().length >= 50) {
+      // A resume problem shouldn't stop the application; it is sent with the cover letter alone.
+      const tailored = await tailorForJob(userId, jobId).catch((e) => { console.error('[agent] resume tailoring failed:', e.message); return null; });
+      if (tailored) await logEvent(userId, id, 'tailored', `Tailored resume for ${job.company} (ATS match ${tailored.ats_before}% → ${tailored.ats_after}%)`);
+    }
     const result = await submit(job, profile, coverLetter);
     const app = await updateApplication(id, userId, { status: 'applied', applied_at: new Date().toISOString(), notes: result.note || '' });
     await logEvent(userId, id, 'applied', `Applied to ${job.title} at ${job.company}`);
@@ -97,16 +130,39 @@ export async function runAgentForUser(userId) {
   }
 }
 
+/**
+ * "Apply to all saved jobs": for each saved job not applied to yet, tailors the resume and cover letter and applies,
+ * one after another, with live progress. Returns how many were queued.
+ */
+export async function applySavedJobs(userId) {
+  const jobs = await db.all(`SELECT s.job_id FROM saved_jobs s WHERE s.user_id = ?
+    AND NOT EXISTS (SELECT 1 FROM applications a WHERE a.user_id = s.user_id AND a.job_id = s.job_id) ORDER BY s.created_at`, userId);
+  if (!jobs.length || running.has(userId)) return { queued: 0, busy: running.has(userId) };
+  running.add(userId);
+  (async () => {
+    try {
+      emit(userId, 'agent:status', { running: true, queued: jobs.length });
+      for (const { job_id } of jobs) await applyToJob(userId, job_id, 'one-click').catch((e) => console.error('[apply-saved]', e.message));
+    } finally {
+      running.delete(userId);
+      emit(userId, 'agent:status', { running: false });
+    }
+  })();
+  return { queued: jobs.length };
+}
+
 /** Background loop: refresh jobs periodically and run the agent for every user with auto-apply on. */
-export function startAgent({ intervalMs = 60_000, syncEveryMs = 30 * 60_000 } = {}) {
+export function startAgent({ intervalMs = 60_000, syncEveryMs = process.env.SYNC_EVERY_MS === undefined || process.env.SYNC_EVERY_MS === '' ? 60 * 60_000 : Number(process.env.SYNC_EVERY_MS) } = {}) {
   let lastSync = 0;
   const tick = async () => {
     try {
-      if (Date.now() - lastSync > syncEveryMs) {
+      // SYNC_EVERY_MS=0 turns in-app syncing off (when a scheduled job such as the GitHub Action does it instead).
+      if (syncEveryMs > 0 && Date.now() - lastSync > syncEveryMs) {
         lastSync = Date.now();
-        const terms = [...new Set((await db.all('SELECT titles FROM profiles WHERE auto_apply = 1')).flatMap((p) => csv(p.titles)))];
+        // Keyword-based sources (Adzuna, JSearch, USAJOBS) search for the job titles users are targeting.
+        const terms = [...new Set((await db.all('SELECT p.titles FROM profiles p JOIN users u ON u.id = p.user_id WHERE u.verified = 1')).flatMap((p) => csv(p.titles).map((t) => t.toLowerCase())))];
         const r = await syncJobs(terms);
-        console.log(`[jobs] synced +${r.added}`, r.errors.length ? r.errors : '');
+        console.log(`[jobs] ${r.total} US jobs from ${r.sources} sources in ${r.seconds}s (+${r.added} new, ${r.updated} refreshed, ${r.removed} closed or expired)`, r.errors.length ? r.errors : '');
       }
       // Only verified accounts: an unverified sign-up must never trigger applications.
       for (const { user_id } of await db.all('SELECT p.user_id FROM profiles p JOIN users u ON u.id = p.user_id WHERE p.auto_apply = 1 AND u.verified = 1')) {

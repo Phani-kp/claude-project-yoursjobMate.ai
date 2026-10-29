@@ -30,7 +30,8 @@ async function connect() {
     const pool = new pg.Pool({
       connectionString: url,
       ssl,
-      max: Number(process.env.DB_POOL_SIZE) || 10,
+      // Small by default: hosted poolers cap connections (Supabase's free session pooler allows 15 in total).
+      max: Number(process.env.DB_POOL_SIZE) || 5,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,
     });
@@ -173,9 +174,55 @@ CREATE TABLE IF NOT EXISTS events (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- One ATS-tailored resume per user and job (regenerating replaces it).
+CREATE TABLE IF NOT EXISTS tailored_resumes (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  resume TEXT NOT NULL,            -- JSON, see RESUME_SCHEMA in resume.js
+  changes TEXT NOT NULL DEFAULT '[]',
+  ats_before INTEGER NOT NULL DEFAULT 0,
+  ats_after INTEGER NOT NULL DEFAULT 0,
+  report TEXT NOT NULL DEFAULT '{}', -- JSON: keyword match before/after
+  ai INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(user_id, job_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_apps_user ON applications(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_events_user ON events(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_posted ON jobs(posted_at DESC);
+
+-- US location and freshness, used by the Job Matches filters.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS city TEXT DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS states TEXT DEFAULT '';   -- ",CA,NY," so one job can match several state filters
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS country TEXT;             -- 'US' for every job kept
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_key TEXT;          -- e.g. "greenhouse:stripe": closed postings are removed per source
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS posted_ts TIMESTAMPTZ;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS seen_at TIMESTAMPTZ DEFAULT now();
+CREATE INDEX IF NOT EXISTS idx_jobs_posted_ts ON jobs(posted_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_company ON jobs(company);
+CREATE INDEX IF NOT EXISTS idx_jobs_source_key ON jobs(source_key);
+
+-- Company career sites added from the app (on top of the built-in list in companies.js); synced for everyone.
+CREATE TABLE IF NOT EXISTS company_boards (
+  id SERIAL PRIMARY KEY,
+  ats TEXT NOT NULL,
+  token TEXT NOT NULL,
+  name TEXT NOT NULL,
+  added_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(ats, token)
+);
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS details_fetched INTEGER DEFAULT 0;
+
+-- Jobs a user bookmarked to tailor and apply to later.
+CREATE TABLE IF NOT EXISTS saved_jobs (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, job_id)
+);
 
 -- Row-level security with no policies: blocks hosted auto-generated APIs (such as Supabase's public Data API)
 -- from reading these tables. The app's own connection owns the tables, so it is unaffected.
@@ -184,6 +231,9 @@ ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE applications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tailored_resumes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE saved_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE company_boards ENABLE ROW LEVEL SECURITY;
 `);
 
 export const STATUSES = ['queued', 'applying', 'applied', 'viewed', 'interview', 'offer', 'rejected', 'failed'];

@@ -4,6 +4,9 @@ const MODEL = process.env.ANTHROPIC_MODEL || 'claude-opus-5-5';
 const client = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
 
 export const aiEnabled = () => !!client;
+// Shared with resume tailoring (server/src/resume.js).
+export const aiClient = client;
+export const AI_MODEL = MODEL;
 
 function templateLetter(job, profile, user) {
   const skills = (profile.skills || '').split(',').map((s) => s.trim()).filter(Boolean).slice(0, 4);

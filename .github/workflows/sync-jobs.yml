@@ -1,0 +1,42 @@
+# Keeps Job Matches fresh around the clock: every 30 minutes GitHub runs the job sync against the production
+# database, so new postings appear (and closed ones disappear) even while your computer or server is off.
+#
+# One-time setup: GitHub repo → Settings → Secrets and variables → Actions → New repository secret
+#   DATABASE_URL   your Supabase/Postgres connection string (same value as in server/.env)
+# Optional secrets for extra sources: ADZUNA_APP_ID, ADZUNA_APP_KEY, USAJOBS_API_KEY, USAJOBS_EMAIL, JSEARCH_API_KEY
+name: Sync jobs
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # GitHub may delay scheduled runs by a few minutes when it is busy
+  workflow_dispatch: {}       # "Run workflow" button on the Actions tab
+
+concurrency:
+  group: sync-jobs
+  cancel-in-progress: false   # never run two syncs at once
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci --omit=dev
+        working-directory: server
+      - name: Sync jobs
+        working-directory: server
+        run: |
+          if [ -z "$DATABASE_URL" ]; then echo "::error::Add the DATABASE_URL secret (Settings → Secrets and variables → Actions)"; exit 1; fi
+          node --no-warnings scripts/sync-jobs.js
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+          USAJOBS_API_KEY: ${{ secrets.USAJOBS_API_KEY }}
+          USAJOBS_EMAIL: ${{ secrets.USAJOBS_EMAIL }}
+          JSEARCH_API_KEY: ${{ secrets.JSEARCH_API_KEY }}
