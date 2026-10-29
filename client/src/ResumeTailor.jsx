@@ -43,7 +43,10 @@ export default function ResumeTailor({ jobId }) {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    api(`/jobs/${jobId}/ats`).then((d) => { setAts(d); setTailored(d.tailored); }).catch((e) => setError(e.message));
+    api(`/jobs/${jobId}/ats`).then((d) => {
+      setAts(d);
+      setTailored(d.tailored);
+    }).catch((e) => setError(e.message));
   }, [jobId]);
 
   if (error && !ats) return <div className="error">{error}</div>;
@@ -95,10 +98,12 @@ export default function ResumeTailor({ jobId }) {
           <div className="kw-help">
             <p className="muted small">
               Not in your resume yet. <b>I have it</b> adds the skill to your Skills section. <b>Learning</b> lists it under
-              "Professional Development: Currently learning", which ATS software still counts. Pick Learning only for skills you're actually studying.
+              "Professional Development: Currently learning", which ATS software can count. Pick Learning only for skills you're actually studying.
             </p>
             {missingAll.some((k) => !confirmed.includes(k) && !learning.includes(k)) && (
-              <button type="button" className="btn sm" onClick={() => setLearning(missingAll.filter((k) => !confirmed.includes(k)))}>Mark the rest as Learning</button>
+              <button type="button" className="btn sm" onClick={() => setLearning(missingAll.filter((k) => !confirmed.includes(k)))}>
+                Add missing keywords as learning
+              </button>
             )}
           </div>
         )}
@@ -124,7 +129,7 @@ export default function ResumeTailor({ jobId }) {
         <>
           {tailored.report?.gap && (
             <div className={`banner small ${tailored.report.gap.weakFit ? 'error-banner' : ''}`}>
-              <b>{tailored.ats_after}% is the honest maximum for now.</b> {tailored.report.gap.message}
+              <b>Target not reached: {tailored.ats_after}%.</b> {tailored.report.gap.message}
               {tailored.report.gap.missing?.length > 0 && <> Missing: {tailored.report.gap.missing.join(', ')}.</>}
             </div>
           )}
@@ -132,7 +137,7 @@ export default function ResumeTailor({ jobId }) {
           <ul className="changes">{tailored.changes.map((c) => <li key={c}>{c}</li>)}</ul>
           <p className="muted small">
             {tailored.ai ? "Rewritten by Claude (AI) from facts in your resume, then checked: any claim your resume doesn't support is removed." : 'Tailored with built-in rules from your own resume and profile only (no AI). Set ANTHROPIC_API_KEY on the server for a full AI rewrite.'}
-            {' '}Standard ATS format: Summary, Skills, Experience, Projects, Education, Certifications, in one column with one date style and no tables or graphics. Review it before you send it.
+            {' '}Every job gets its own version: supported job keywords are placed in Skills, relevant Experience and Projects are prioritised, and unsupported skills are never invented. Standard ATS format: Summary, Skills, Experience, Projects, Education, Certifications, in one column with one date style and no tables or graphics. Review it before you send it.
           </p>
           <details className="preview">
             <summary>Preview tailored resume</summary>

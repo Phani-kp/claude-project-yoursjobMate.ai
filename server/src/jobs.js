@@ -162,6 +162,10 @@ export function matchScore(job, profile) {
 export const DATE_FILTERS = { 1: 'Past 24 hours', 3: 'Past 3 days', 7: 'Past week', 14: 'Past 2 weeks', 30: 'Past month' };
 const list = (v) => [].concat(v ?? []).flatMap((x) => String(x).split('|')).map((x) => x.trim()).filter(Boolean);
 
+// A plain "Data Engineer" search should focus on individual-contributor roles,
+// rather than returning executive or staff-level variants of the same title.
+const DATA_ENGINEER_HIGH_LEVEL = '(^|[^A-Za-z])(director|principal|staff|lead|manager|head|vp|vice president|chief|distinguished|architect)([^A-Za-z]|$)';
+
 /** Normalises query-string filters. */
 export function parseFilters(q = {}) {
   const days = Number(q.posted);
@@ -186,6 +190,12 @@ function whereFor(userId, f, skip = '') {
   for (const word of f.q.split(/\s+/).filter(Boolean).slice(0, 6)) {
     where.push('(j.title ILIKE ? OR j.company ILIKE ? OR j.tags ILIKE ?)');
     params.push(...Array(3).fill(`%${word}%`));
+  }
+  if (/\bdata\s+engineer\b/i.test(f.q)) {
+    where.push('j.title ~* ?');
+    params.push('\\mdata[[:space:]]+engineer\\M');
+    where.push('NOT (j.title ~* ?)');
+    params.push(DATA_ENGINEER_HIGH_LEVEL);
   }
   if (skip !== 'company' && f.companies.length) { where.push('j.company = ANY(?::text[])'); params.push(f.companies); }
   if (skip !== 'state' && f.states.length) {

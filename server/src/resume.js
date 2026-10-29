@@ -413,11 +413,11 @@ export function parseResume(text, profile = {}, user = {}) {
 /** Plain-text rendering, used for re-scoring and "copy as text". */
 export function resumeToText(r) {
   const out = [r.name, r.headline, r.contact.join(' | '), ''];
-  if (r.summary) out.push('SUMMARY', r.summary, '');
-  if (r.skillGroups?.length) out.push('SKILLS', ...r.skillGroups.map((g) => `${g.name}: ${g.items.join(', ')}`), '');
-  else if (r.skills.length) out.push('SKILLS', r.skills.join(', '), '');
+  if (r.summary) out.push('PROFESSIONAL SUMMARY', r.summary, '');
+  if (r.skillGroups?.length) out.push('TECHNICAL SKILLS', ...r.skillGroups.map((g) => `${g.name}: ${g.items.join(', ')}`), '');
+  else if (r.skills.length) out.push('TECHNICAL SKILLS', r.skills.join(', '), '');
   for (const s of r.sections) {
-    out.push(s.title.toUpperCase());
+    out.push(s.title === 'Experience' ? 'PROFESSIONAL EXPERIENCE' : s.title.toUpperCase());
     for (const it of s.items) {
       out.push([it.heading, it.subheading, it.dates].filter(Boolean).join(' | '));
       for (const b of it.bullets) out.push(`• ${b}`);
@@ -464,7 +464,7 @@ export function cleanJobTitle(job) {
 // ---------------------------------------------------------------------------
 
 /** Standard ATS section order and titles. Anything else goes after, in its original order. */
-const SECTION_ORDER = ['Experience', 'Projects', 'Education', 'Certifications', 'Professional Development'];
+const SECTION_ORDER = ['Experience', 'Projects', 'Certifications', 'Education', 'Professional Development'];
 const STANDARD_TITLE = (title) => {
   const kind = sectionOf(title);
   return kind && TITLES[kind] ? TITLES[kind] : title.replace(/\b\w/g, (c) => c.toUpperCase()).replace(/\B\w+/g, (w) => w.toLowerCase());
@@ -518,8 +518,13 @@ export function standardise(r) {
   merged.sort((a, b) => rank(a.title) - rank(b.title));
   return {
     name: String(r.name || '').trim(), headline: String(r.headline || '').trim(),
-    contact: [...new Set((r.contact || []).map((c) => String(c).trim()).filter(Boolean))],
+    contact: [...new Map((r.contact || []).map((raw) => {
+      const value = String(raw).trim();
+      const key = /@/.test(value) ? `email:${value.toLowerCase()}` : /https?:|www\./i.test(value) ? `url:${value.toLowerCase().replace(/^https?:\/\/(www\.)?/, '').replace(/\/+$/, '')}` : `phone:${value.replace(/\D/g, '').slice(-10)}`;
+      return [key, value];
+    }).filter(([, value]) => value)) .values()],
     summary: String(r.summary || '').replace(/\s+/g, ' ').trim(), skills, skillGroups, sections: merged,
+    keywords: [...new Set((r.keywords || []).map((k) => String(k).toLowerCase()).filter(Boolean))],
   };
 }
 
@@ -593,7 +598,7 @@ const FAMILY_WORK = {
 /**
  * Rule-based tailoring (no AI), the way a professional resume writer tailors for an ATS, using only the candidate's
  * own material:
- * - headline: the target role plus the four strongest matching skills, e.g. "Data Engineer | Spark • Python • AWS • Snowflake";
+ * - headline: the target role only, keeping the header clean and professional;
  * - summary: a role- and job-specific opening line, then the candidate's own summary (its generic first line replaced);
  * - skills: the candidate's own categories kept, the most relevant category first and matching skills first in each; skills
  *   that appear only in experience bullets are surfaced; the job's exact wording is used for matching skills;
@@ -617,7 +622,12 @@ function tailorWithoutAI({ resumeText, profile, user, job, evidence, confirmed }
     base.skillGroups.sort((a, b) => b.items.filter(isRelevant).length - a.items.filter(isRelevant).length);
     // The job's own wording first, so the ATS finds the exact term ("Data Modeling" for star-schema work, "ETL Pipelines"…).
     const extra = [...surfaced.map(pretty), ...csv(profile.skills).filter((s) => !base.skills.some((x) => x.toLowerCase() === s.toLowerCase()))];
-    if (extra.length) base.skillGroups.unshift({ name: 'Core Skills for This Role', items: extra });
+    if (extra.length) {
+      // Do not invent a new category just to fit the job. Use one conventional,
+      // flat Skills section when evidence needs to be surfaced.
+      base.skills = [...extra, ...base.skills];
+      base.skillGroups = [];
+    }
   } else {
     const otherEvidence = HARD_SKILLS.filter((t) => have.has(t) && !relevantHard.includes(t)).map(pretty);
     base.skills = [...relevantHard.map(pretty), ...base.skills, ...csv(profile.skills), ...otherEvidence];
@@ -628,11 +638,10 @@ function tailorWithoutAI({ resumeText, profile, user, job, evidence, confirmed }
   const fits = titleFits(job, ownTitles);
   const ownRole = (base.headline || profile.headline || detected.label || 'Professional').split(/\s*[|•]\s*/)[0].replace(/\b\w+/g, (w) => (w === w.toUpperCase() && w.length > 3 ? w[0] + w.slice(1).toLowerCase() : w));
   const role = fits ? roleTitle(job) : ownRole;
-  const top = relevantHard.slice(0, 4).map((k) => base.skills.find((s) => textHas(s, k) && s.length <= 24) || pretty(k));
-  base.headline = top.length ? `${role} | ${top.join(' • ')}` : role;
+  base.headline = role;
   const years = detected.years ? `${detected.years}+ years of experience` : 'hands-on experience';
   const work = FAMILY_WORK[detected.family] || 'delivering high-impact results';
-  const lead = relevantHard.slice(0, 6).map(pretty);
+  const lead = relevantHard.slice(0, 4).map(pretty);
   const intro = `${role} with ${years} ${work}${lead.length ? `, with deep expertise in ${lead.slice(0, -1).join(', ')}${lead.length > 1 ? ' and ' : ''}${lead.at(-1)}` : ''}.`;
   const own = base.summary.split(/(?<=[.!?])\s+/);
   // The candidate's own "X with N years of experience…" opener is replaced by the tailored one; the rest is kept.
@@ -640,8 +649,16 @@ function tailorWithoutAI({ resumeText, profile, user, job, evidence, confirmed }
   const softLine = relevantSoft.length && !relevantSoft.every((s) => textHas(rest, s)) ? ` Recognized for ${relevantSoft.slice(0, 3).map((s) => (s === 'cross-functional' ? 'cross-functional collaboration' : s)).join(', ')}.` : '';
   base.summary = `${intro} ${rest}${softLine}`.trim();
 
-  // Experience: most relevant bullets first.
-  for (const s of base.sections) for (const it of s.items) it.bullets.sort((a, b) => relevance(b) - relevance(a));
+  // Experience and projects: put the evidence most relevant to this job first.
+  for (const s of base.sections) {
+    for (const it of s.items) it.bullets.sort((a, b) => relevance(b) - relevance(a));
+    if (s.title === 'Projects') {
+      s.items.sort((a, b) => {
+        const score = (it) => it.bullets.reduce((n, bullet) => n + relevance(bullet), 0);
+        return score(b) - score(a);
+      });
+    }
+  }
 
   const changes = [
     fits ? `Headline set to the target role with your strongest matching skills: "${base.headline}".` : `Kept your own role in the headline: your past titles don't match "${cleanJobTitle(job)}" closely enough to claim it.`,
@@ -649,7 +666,7 @@ function tailorWithoutAI({ resumeText, profile, user, job, evidence, confirmed }
     base.skillGroups.length ? 'Kept your skill categories, with the most relevant category and the matching skills first.' : 'Matching skills listed first in your Skills section.',
     ...(surfaced.length ? [`Surfaced skills you already show in your experience, in the job's wording: ${surfaced.map(pretty).join(', ')}.`] : []),
     ...(confirmed.length ? [`Added skills you confirmed you have: ${confirmed.map(pretty).join(', ')}.`] : []),
-    'In every role, the bullets that match this job now come first.',
+    'In Experience and Projects, the entries and bullets that match this job now come first.',
     'Standard ATS format: Summary, Skills, Experience, Projects, Education, Certifications; one column; one date style; no tables or graphics.',
   ];
   return { resume: base, changes };
@@ -738,8 +755,10 @@ export async function tailorResume({ resumeText, profile, user, job, aiClient, m
   const before = atsReport(resumeText, job);
   // Only skills this job actually asks for can be confirmed.
   const confirmed = confirmedSkills.map((s) => String(s).toLowerCase()).filter((s) => before.missing.includes(s));
-  // Skills the candidate is actively learning: listed as such, never as skills they already have.
-  const learning = learningSkills.map((s) => String(s).toLowerCase()).filter((s) => before.missing.includes(s) && !confirmed.includes(s));
+  // Only include missing keywords when the candidate explicitly confirms they
+  // have them or are actively learning them.
+  const learning = learningSkills.map((s) => String(s).toLowerCase())
+    .filter((s) => before.missing.includes(s) && !confirmed.includes(s));
   // The evidence: the resume itself, the skills on the user's profile, and skills they ticked as "I have this".
   const evidence = [resumeText, profile.skills, profile.headline, profile.titles, confirmed.join(', ')].filter(Boolean).join('\n');
   let result = null;
@@ -754,12 +773,25 @@ export async function tailorResume({ resumeText, profile, user, job, aiClient, m
   }
   result ||= tailorWithoutAI({ resumeText, profile, user, job, evidence, confirmed });
   result.resume = standardise(result.resume);
+  result.resume.keywords = [...new Set([...before.matched, ...confirmed, ...learning])];
   const removed = enforceEvidence(result.resume, evidence, resumeText);
+  // Tailoring may reorder or rewrite content, but it must never remove a keyword
+  // that was already supported by the original resume.
+  const preserved = before.matched.filter((keyword) => !textHas(resumeToText(result.resume), keyword));
+  if (preserved.length) {
+    result.resume = standardise({
+      ...result.resume,
+      skillGroups: [],
+      skills: [...preserved.map(pretty), ...result.resume.skills],
+    });
+    result.resume.keywords = [...new Set([...result.resume.keywords, ...preserved])];
+    result.changes.push(`Preserved supported keywords from the original resume: ${preserved.map(pretty).join(', ')}.`);
+  }
   if (learning.length) {
     // Shown openly as learning, in its own section: ATS software reads the keywords, and recruiters see the truth.
     result.resume.sections = result.resume.sections.filter((s) => s.title !== 'Professional Development');
     result.resume.sections.push({ title: 'Professional Development', items: [{ heading: 'Currently learning', subheading: '', dates: '', bullets: [learning.map(pretty).join(', ')] }] });
-    result.changes.push(`Added a Professional Development section listing what you're currently learning: ${learning.map(pretty).join(', ')}. Be ready to talk about your progress in interviews.`);
+    result.changes.push(`Added a Professional Development section listing what you're currently learning: ${learning.map(pretty).join(', ')}. Be ready to discuss these skills in interviews.`);
   }
   if (removed.length) result.changes.push(`Removed ${removed.length} claim${removed.length === 1 ? '' : 's'} your resume doesn't support (${removed.map(pretty).join(', ')}).`);
   const after = atsReport(resumeToText(result.resume), job);
@@ -804,7 +836,7 @@ Use this standard ATS format, always:
 - summary: 2–4 sentences, leading with the role, years of experience and the most relevant supported skills.
 - skills: the supported job keywords first, written exactly as the job writes them, then the candidate's other relevant skills.
 - sections, in this order and with these exact titles: "Experience", "Projects", "Education", "Certifications". For each item: heading (job title / degree / project), subheading (company or school, city), dates ("Jan 2021 – Present").
-- bullets: start with a strong action verb, one or two lines each, keep every number and result the candidate gave, and work the supported keywords in naturally where the experience genuinely involved them. Most relevant bullets first.
+- bullets: start with a strong action verb, one or two lines each, keep every number and result the candidate gave, and work the supported keywords in naturally where the experience genuinely involved them. Most relevant experience and project entries and bullets first.
 
 Truthfulness rules (most important):
 - Only use facts from the candidate's resume and profile. Never invent or inflate employers, titles, dates, degrees, certifications, numbers, responsibilities or skills.
@@ -837,29 +869,35 @@ ${resumeText}`,
 
 export async function resumeToDocx(r) {
   const FONT = 'Calibri';
+  const keywords = [...new Set((r.keywords || []).map((k) => String(k).trim()).filter(Boolean))].sort((a, b) => b.length - a.length);
+  const keywordPattern = keywords.length ? new RegExp('(' + keywords.map(escapeRe).join('|') + ')', 'gi') : null;
+  const keywordRuns = (text, opts = {}) => {
+    const parts = keywordPattern ? String(text).split(keywordPattern) : [String(text)];
+    return parts.map((part) => new TextRun({ ...opts, text: part, bold: opts.bold || keywords.some((k) => k.toLowerCase() === part.toLowerCase()) }));
+  };
   const heading = (text) => new Paragraph({
     spacing: { before: 240, after: 80 },
     border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: '999999', space: 2 } },
     children: [new TextRun({ text: text.toUpperCase(), bold: true, size: 24, font: FONT })],
   });
-  const para = (text, opts = {}) => new Paragraph({ spacing: { after: 60 }, ...opts, children: [new TextRun({ text, size: 21, font: FONT })] });
+  const para = (text, opts = {}) => new Paragraph({ spacing: { after: 60 }, ...opts, children: keywordRuns(text, { size: 21, font: FONT }) });
   const children = [
     new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: r.name, bold: true, size: 36, font: FONT })] }),
   ];
-  if (r.headline) children.push(new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: r.headline, size: 24, font: FONT })] }));
+  if (r.headline) children.push(new Paragraph({ alignment: AlignmentType.CENTER, children: keywordRuns(r.headline, { size: 24, font: FONT }) }));
   if (r.contact.length) children.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 120 }, children: [new TextRun({ text: r.contact.join('  |  '), size: 20, font: FONT })] }));
-  if (r.summary) children.push(heading('Summary'), para(r.summary));
+  if (r.summary) children.push(heading('Professional Summary'), para(r.summary));
   if (r.skillGroups?.length) {
     // "Big Data & Processing: Spark, PySpark, Databricks": plain paragraphs with a bold label, which every ATS reads.
-    children.push(heading('Skills'), ...r.skillGroups.map((g) => new Paragraph({ spacing: { after: 40 }, children: [
-      new TextRun({ text: `${g.name}: `, bold: true, size: 21, font: FONT }), new TextRun({ text: g.items.join(', '), size: 21, font: FONT }),
+    children.push(heading('Technical Skills'), ...r.skillGroups.map((g) => new Paragraph({ spacing: { after: 40 }, children: [
+      new TextRun({ text: `${g.name}: `, bold: true, size: 21, font: FONT }), ...keywordRuns(g.items.join(', '), { size: 21, font: FONT }),
     ] })));
-  } else if (r.skills.length) children.push(heading('Skills'), para(r.skills.join(', ')));
+  } else if (r.skills.length) children.push(heading('Technical Skills'), para(r.skills.join(', ')));
   for (const s of r.sections) {
     if (!s.items.length) continue;
-    children.push(heading(s.title));
+    children.push(heading(s.title === 'Experience' ? 'Professional Experience' : s.title));
     for (const it of s.items) {
-      const runs = [new TextRun({ text: it.heading, bold: true, size: 22, font: FONT })];
+      const runs = keywordRuns(it.heading, { bold: true, size: 22, font: FONT });
       if (it.subheading) runs.push(new TextRun({ text: `, ${it.subheading}`, size: 22, font: FONT }));
       if (it.dates) runs.push(new TextRun({ text: `  ${it.dates}`, size: 20, font: FONT, italics: true }));
       children.push(new Paragraph({ spacing: { before: 120, after: 40 }, children: runs }));
