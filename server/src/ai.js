@@ -2,6 +2,9 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const MODEL = process.env.ANTHROPIC_MODEL || 'claude-opus-5-5';
 const client = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
+if (!client && process.env.NODE_ENV !== 'test') {
+  console.warn('[ai] ANTHROPIC_API_KEY is not set: resumes are tailored with built-in rules only (no AI rewrite). Add it to server/.env.');
+}
 
 export const aiEnabled = () => !!client;
 // Shared with resume tailoring (server/src/resume.js).
