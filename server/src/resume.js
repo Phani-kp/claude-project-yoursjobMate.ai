@@ -763,18 +763,40 @@ export async function tailorResume({ resumeText, profile, user, job, aiClient, m
   const evidence = [resumeText, profile.skills, profile.headline, profile.titles, confirmed.join(', ')].filter(Boolean).join('\n');
   let result = null;
   let ai = false;
+  // Why the AI did or didn't write this version, shown to the user.
+  let aiNote = aiClient ? null : 'AI tailoring is off: ANTHROPIC_API_KEY is not set on the server, so only built-in rules were used (they reorder your resume but cannot rewrite it).';
+  let inferred = [];
   if (aiClient) {
     try {
       result = await tailorWithAI({ resumeText, profile, user, job, evidence, confirmed, aiClient, model });
       ai = !!result;
+      if (!result) aiNote = 'The AI declined this request, so built-in rules were used instead.';
     } catch (e) {
       console.error('[resume] AI tailoring failed, using rules:', e.message);
+      aiNote = `AI tailoring failed (${e.status ? `${e.status} ` : ''}${e.message}), so built-in rules were used instead.`;
     }
   }
+  if (result) {
+    inferred = verifiedInferences(result.inferredSkills, before.missing, resumeText);
+    delete result.inferredSkills;
+  }
   result ||= tailorWithoutAI({ resumeText, profile, user, job, evidence, confirmed });
+  // Skills the AI showed are in the resume in other words ("extracted, transformed and loaded" → ETL), each backed by a
+  // verbatim quote checked above, count as evidence too.
+  const fullEvidence = [evidence, ...inferred.map((i) => i.keyword)].join('\n');
   result.resume = standardise(result.resume);
-  result.resume.keywords = [...new Set([...before.matched, ...confirmed, ...learning])];
-  const removed = enforceEvidence(result.resume, evidence, resumeText);
+  result.resume.keywords = [...new Set([...before.matched, ...confirmed, ...learning, ...inferred.map((i) => i.keyword)])];
+  const removed = enforceEvidence(result.resume, fullEvidence, resumeText);
+  if (inferred.length) {
+    // Make sure each proven keyword is listed in Skills, in the job's wording.
+    const missingFromSkills = inferred.filter((i) => !result.resume.skills.some((s) => textHas(s, i.keyword)));
+    if (missingFromSkills.length) {
+      const extra = missingFromSkills.map((i) => pretty(i.keyword));
+      if (result.resume.skillGroups.length) result.resume.skillGroups[0].items.unshift(...extra);
+      result.resume.skills.unshift(...extra);
+    }
+    result.changes.push(...inferred.map((i) => `Matched "${pretty(i.keyword)}" from your resume: "${i.quote}".`));
+  }
   // Tailoring may reorder or rewrite content, but it must never remove a keyword
   // that was already supported by the original resume.
   const preserved = before.matched.filter((keyword) => !textHas(resumeToText(result.resume), keyword));
@@ -804,7 +826,35 @@ export async function tailorResume({ resumeText, profile, user, job, aiClient, m
         ? `This job screens for ${after.missingHard.length} skill${after.missingHard.length === 1 ? '' : 's'} your resume doesn't show. For each one, choose "I have it" if you do, or "Learning" if you're actively learning it (listed openly under Professional Development, which ATS software still counts), then tailor again.`
         : 'Add more detail and numbers to your experience bullets to strengthen the match.'),
   };
-  return { ...result, before, after, ai, removed, gap };
+  return { ...result, before, after, ai, aiNote, removed, gap, inferred };
+}
+
+const squash = (s) => String(s || '').toLowerCase().replace(/[•\-–*▪●◦·]/g, ' ').replace(/\s+/g, ' ').trim();
+
+/**
+ * Keeps only the AI's inferred skills that the job asks for and whose quote really appears, word for word, in the
+ * candidate's resume. Anything else is dropped.
+ */
+function verifiedInferences(list, missing, resumeText) {
+  const resume = squash(resumeText);
+  const seen = new Set();
+  return (Array.isArray(list) ? list : [])
+    .map((i) => ({ keyword: String(i?.keyword || '').toLowerCase().trim(), quote: String(i?.quote || '').trim() }))
+    .map((i) => ({ ...i, keyword: ALIASES[i.keyword] || i.keyword }))
+    .filter((i) => {
+      if (!missing.includes(i.keyword) || seen.has(i.keyword) || i.quote.length < 12 || !resume.includes(squash(i.quote))) return false;
+      seen.add(i.keyword);
+      return true;
+    });
+}
+
+/** Lines of the resume that show each keyword, so the AI knows where to work it into the bullets. */
+function keywordEvidence(resumeText, keywords) {
+  const lines = String(resumeText).split('\n').map((l) => l.trim()).filter((l) => l.length > 20);
+  return keywords.map((k) => {
+    const where = lines.filter((l) => textHas(l, k)).slice(0, 2);
+    return `- ${k}${where.length ? `: ${where.map((l) => `"${l.slice(0, 160)}"`).join(' / ')}` : ' (from profile skills)'}`;
+  }).join('\n');
 }
 
 async function tailorWithAI({ resumeText, profile, user, job, evidence, confirmed, aiClient, model }) {
@@ -812,10 +862,21 @@ async function tailorWithAI({ resumeText, profile, user, job, evidence, confirme
   const schema = {
     type: 'object',
     additionalProperties: false,
-    required: ['resume', 'changes'],
+    required: ['resume', 'changes', 'inferredSkills'],
     properties: {
       resume: RESUME_SCHEMA,
       changes: { type: 'array', items: { type: 'string' }, description: 'Short list of what you changed and why' },
+      inferredSkills: {
+        type: 'array',
+        description: 'Keywords from the NOT-YET-SHOWN list that the resume genuinely demonstrates in other words. Empty if none.',
+        items: {
+          type: 'object', additionalProperties: false, required: ['keyword', 'quote'],
+          properties: {
+            keyword: { type: 'string', description: 'The keyword exactly as written in the NOT-YET-SHOWN list' },
+            quote: { type: 'string', description: 'A verbatim phrase (at least a few words) copied from CURRENT RESUME that proves it' },
+          },
+        },
+      },
     },
   };
   const { hard, soft } = jobKeywords(job);
@@ -827,26 +888,31 @@ async function tailorWithAI({ resumeText, profile, user, job, evidence, confirme
     max_tokens: 16000,
     betas: ['server-side-fallback-2026-07-01'],
     fallbacks: 'default',
-    output_config: { effort: 'medium', format: betaJSONSchemaOutputFormat(schema) },
-    system: `You are an expert resume writer who tailors resumes for Applicant Tracking Systems (Workday, Greenhouse, Lever, Taleo, iCIMS).
-Goal: an 85–95% ATS match for the target job, reached only through the candidate's real experience.
+    output_config: { effort: 'high', format: betaJSONSchemaOutputFormat(schema) },
+    system: `You are an expert resume writer tailoring a candidate's real resume to one job so it ranks high in Applicant Tracking Systems (Workday, Greenhouse, Lever, Taleo, iCIMS) and reads well to a recruiter.
+Goal: an 85–95% ATS match, reached only through the candidate's real experience.
 
-Use this standard ATS format, always:
-- headline: the target job title if the candidate's experience fits it; otherwise their own current title.
-- summary: 2–4 sentences, leading with the role, years of experience and the most relevant supported skills.
-- skills: the supported job keywords first, written exactly as the job writes them, then the candidate's other relevant skills.
-- sections, in this order and with these exact titles: "Experience", "Projects", "Education", "Certifications". For each item: heading (job title / degree / project), subheading (company or school, city), dates ("Jan 2021 – Present").
-- bullets: start with a strong action verb, one or two lines each, keep every number and result the candidate gave, and work the supported keywords in naturally where the experience genuinely involved them. Most relevant experience and project entries and bullets first.
+What to do:
+- Rewrite, don't just reorder. Rewrite every Experience and Projects bullet so it describes what the candidate actually did in the job's own vocabulary: if the job says "data pipelines" and the resume says "flows that move data", write "data pipelines". Keep every number, metric, tool and result the candidate gave.
+- Work each SUPPORTED keyword into Skills (spelled exactly as the job spells it) and into at least one bullet of the role where the evidence shows it was used.
+- Look hard for skills on the NOT-YET-SHOWN list that the resume demonstrates in different words (e.g. "extracted, transformed and loaded data" is ETL; "built dashboards in Tableau for execs" is data visualization). For each, add it to "inferredSkills" with a verbatim quote copied exactly from the resume, and you may then use it in the resume. Quotes are checked word for word; a skill without a real quote is removed.
+- headline: the target job title if the candidate's past titles fit it; otherwise their own current title.
+- summary: 2–4 sentences: role, years of experience, the 3–5 most relevant skills for this job, and one concrete achievement from the resume.
+- skills: keep the candidate's categories if they have them (skillGroups), most relevant category first and job keywords first within each; otherwise a flat list, job keywords first.
+- Order: within each role, the bullets that match this job first. Projects: the most relevant first.
+- Format: sections titled exactly "Experience", "Projects", "Education", "Certifications"; each item has heading (job title / degree / project), subheading (company or school, city), dates ("Jan 2021 – Present"). Keep every role, employer, date, degree and certification from the original.
 
-Truthfulness rules (most important):
-- Only use facts from the candidate's resume and profile. Never invent or inflate employers, titles, dates, degrees, certifications, numbers, responsibilities or skills.
-- You may rephrase, reorder, combine and condense what is there, and use the job's terminology for things the candidate actually did.
-- Never add any skill from the UNSUPPORTED list. If the match falls short of 85% because of them, say so in "changes" and name them.`,
+Truthfulness (overrides everything above):
+- Never invent or inflate employers, titles, dates, degrees, certifications, numbers, team sizes, responsibilities or tools.
+- A NOT-YET-SHOWN keyword may appear only if you list it in inferredSkills with a real quote. Otherwise leave it out, and name it in "changes" as a gap.`,
     messages: [{
       role: 'user',
       content: `TARGET JOB: ${job.title} at ${job.company}${job.location ? ` (${job.location})` : ''}
-SUPPORTED keywords (the candidate has evidence; feature them): ${supported.join(', ') || '(none)'}
-UNSUPPORTED keywords (no evidence; never add): ${unsupported.join(', ') || '(none)'}
+
+SUPPORTED keywords (the candidate already shows these; feature every one) with where the resume shows them:
+${supported.length ? keywordEvidence(evidence, supported) : '(none)'}
+
+NOT-YET-SHOWN keywords (the job screens for these; use one only with a verbatim quote in inferredSkills): ${unsupported.join(', ') || '(none)'}
 
 JOB DESCRIPTION:
 ${job.description || '(none provided)'}

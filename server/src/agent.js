@@ -48,7 +48,7 @@ export async function tailorForJob(userId, jobId, confirmedSkills = [], learning
   const user = await db.get('SELECT id, name, email FROM users WHERE id = ?', userId);
   const profile = await getProfile(userId);
   const t = await tailorResume({ resumeText: profile.resume_text, profile, user, job, aiClient, model: AI_MODEL, confirmedSkills, learningSkills });
-  const report = { before: t.before, after: t.after, gap: t.gap, removed: t.removed };
+  const report = { before: t.before, after: t.after, gap: t.gap, removed: t.removed, inferred: t.inferred, aiNote: t.aiNote };
   const { rows: [row] } = await db.run(`INSERT INTO tailored_resumes (user_id, job_id, resume, changes, ats_before, ats_after, report, ai)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (user_id, job_id) DO UPDATE SET resume = EXCLUDED.resume, changes = EXCLUDED.changes, ats_before = EXCLUDED.ats_before,

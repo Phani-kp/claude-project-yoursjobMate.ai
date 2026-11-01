@@ -226,6 +226,31 @@ test('tailored resumes use the standard format and never keep claims the resume 
   // Unsupported keywords are not added just to inflate the ATS score.
   assert.ok(t.gap && t.gap.missing.includes('kubernetes') && t.gap.missing.includes('aws'));
 
+  assert.equal(t.aiNote, null);
+
+  // The AI may match a job keyword written differently in the resume, but only with a verbatim quote that really exists.
+  const etlResume = `${resumeText}\n• Extracted, transformed and loaded sales data from 12 sources into the warehouse`;
+  const etlJob = { title: 'Frontend Engineer', company: 'Globex', description: 'React, TypeScript, ETL and Kubernetes required.' };
+  const inferring = { beta: { messages: { parse: async () => ({ stop_reason: 'end_turn', parsed_output: {
+    changes: [],
+    inferredSkills: [
+      { keyword: 'etl', quote: 'Extracted, transformed and loaded sales data from 12 sources' },
+      { keyword: 'kubernetes', quote: 'Ran everything on Kubernetes clusters' },
+    ],
+    resume: {
+      name: 'Sam Lee', headline: 'Frontend Engineer', contact: ['sam@example.com'], summary: 'Frontend engineer.', skillGroups: [],
+      skills: ['React', 'TypeScript', 'ETL', 'Kubernetes'],
+      sections: [{ title: 'Experience', items: [{ heading: 'Frontend Developer', subheading: 'Acme', dates: '01/2021 - present', bullets: ['Built ETL pipelines loading sales data from 12 sources', 'Ran Kubernetes clusters'] }] }],
+    },
+  } }) } } };
+  const inf = await tailorResume({ resumeText: etlResume, profile: {}, user: { name: 'Sam Lee', email: 'sam@example.com' }, job: etlJob, aiClient: inferring, model: 'x' });
+  assert.deepEqual(inf.inferred.map((i) => i.keyword), ['etl'], 'only the keyword with a real quote is accepted');
+  assert.ok(inf.resume.skills.includes('ETL') && !inf.resume.skills.includes('Kubernetes'));
+  assert.ok(inf.after.matched.includes('etl') && inf.after.score > inf.before.score);
+
+  // Without an AI client, the user is told why the resume was not rewritten.
+  assert.match((await tailorResume({ resumeText, profile: {}, user: { name: 'Sam Lee', email: 'sam@example.com' }, job })).aiNote, /ANTHROPIC_API_KEY/);
+
   // Rules-based tailoring of a well-matched job reaches the 85% target from real evidence alone.
   const fit = await tailorResume({ resumeText, profile: { experience_years: 4 }, user: { name: 'Sam Lee', email: 'sam@example.com' }, job: { title: 'Frontend Engineer', company: 'Globex', description: 'React, TypeScript and JavaScript.' } });
   assert.ok(fit.after.score >= 85, `score ${fit.after.score}`);

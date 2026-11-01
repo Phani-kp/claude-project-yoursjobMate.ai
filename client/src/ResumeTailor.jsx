@@ -127,6 +127,7 @@ export default function ResumeTailor({ jobId }) {
 
       {tailored && (
         <>
+          {!tailored.ai && tailored.report?.aiNote && <div className="banner small error-banner"><b>Not AI-tailored.</b> {tailored.report.aiNote}</div>}
           {tailored.report?.gap && (
             <div className={`banner small ${tailored.report.gap.weakFit ? 'error-banner' : ''}`}>
               <b>Target not reached: {tailored.ats_after}%.</b> {tailored.report.gap.message}
@@ -136,7 +137,7 @@ export default function ResumeTailor({ jobId }) {
           {tailored.ats_after >= TARGET && <div className="banner ok small">✓ {tailored.ats_after}% match, from your real experience only.</div>}
           <ul className="changes">{tailored.changes.map((c) => <li key={c}>{c}</li>)}</ul>
           <p className="muted small">
-            {tailored.ai ? "Rewritten by Claude (AI) from facts in your resume, then checked: any claim your resume doesn't support is removed." : 'Tailored with built-in rules from your own resume and profile only (no AI). Set ANTHROPIC_API_KEY on the server for a full AI rewrite.'}
+            {tailored.ai ? "Rewritten by Claude (AI) from facts in your resume, then checked: any skill it matched from different wording must quote your resume word for word, and any claim your resume doesn't support is removed." : 'Tailored with built-in rules from your own resume and profile only (no AI rewrite).'}
             {' '}Every job gets its own version: supported job keywords are placed in Skills, relevant Experience and Projects are prioritised, and unsupported skills are never invented. Standard ATS format: Summary, Skills, Experience, Projects, Education, Certifications, in one column with one date style and no tables or graphics. Review it before you send it.
           </p>
           <details className="preview">
