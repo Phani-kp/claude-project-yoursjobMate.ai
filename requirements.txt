@@ -22,13 +22,13 @@
 #  --------------------------------
 #  - PostgreSQL: if DATABASE_URL is left empty, the app uses an embedded
 #    database (PGlite) stored in server/data/pgdata.
-#  - An email server: if SMTP_HOST is left empty, sign-up and password-reset
+#  - An email service: if BREVO_API_KEY and SMTP_HOST are empty, sign-up and password-reset
 #    codes are printed in the server terminal.
 #
 #  NEEDED ONLY FOR PRODUCTION (set these in server/.env or on your host)
 #  ---------------------------------------------------------------------
 #  - A cloud PostgreSQL database (Neon, Supabase, RDS...) -> DATABASE_URL
-#  - An SMTP email provider (Resend, Brevo, SendGrid...)  -> SMTP_* settings
+#  - An email service: Brevo API key (BREVO_API_KEY) or SMTP (SMTP_* settings)
 #  - JWT_SECRET and PASSWORD_PEPPER: two long random strings
 #  - Optional: Docker, if you deploy with the Dockerfile
 #

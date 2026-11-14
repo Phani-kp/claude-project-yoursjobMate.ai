@@ -1,7 +1,7 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import pg from 'pg';
 import { validateDatabaseConfig } from './config.js';
+import { acquireDataDirectoryLock } from './dataDirectoryLock.js';
 
 /**
  * PostgreSQL storage.
@@ -22,8 +22,9 @@ const toPg = (sql) => {
 };
 
 async function connect() {
-  if (process.env.DATABASE_URL) {
-    const url = process.env.DATABASE_URL;
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  if (databaseUrl) {
+    const url = databaseUrl;
     if (/\[YOUR-PASSWORD\]/i.test(url)) throw new Error('DATABASE_URL still contains [YOUR-PASSWORD]: replace it (brackets included) with your database password');
     // Verify cloud TLS certificates by default; explicit URL TLS settings take precedence.
     const local = /@(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
@@ -61,16 +62,41 @@ async function connect() {
   }
 
   const { PGlite, types } = await import('@electric-sql/pglite');
-  const dir = process.env.DB_PATH === ':memory:' ? undefined : path.resolve(process.env.DB_PATH || 'data/pgdata');
-  if (dir) fs.mkdirSync(dir, { recursive: true });
-  const lite = await PGlite.create(dir, { parsers: { [types.INT8]: Number } });
+  // Keep the same database whether invoked from the repo root or from server/.
+  const dir = process.env.DB_PATH === ':memory:' ? undefined : path.resolve(import.meta.dirname, '..', process.env.DB_PATH?.trim() || 'data/pgdata');
+  const release = dir ? acquireDataDirectoryLock(dir) : () => {};
+  const startupMessages = [];
+  let initializing = true;
+  let lite;
+  try {
+    lite = await PGlite.create(dir, {
+      parsers: { [types.INT8]: Number },
+      onStderr(line) {
+        if (initializing) {
+          startupMessages.push(String(line).trim().slice(0, 1000));
+          if (startupMessages.length > 12) startupMessages.shift();
+        }
+        return false;
+      },
+    });
+  } catch (error) {
+    release();
+    const detail = startupMessages.findLast((line) => /PANIC:|FATAL:/i.test(line)) || error.message;
+    throw Object.assign(new Error(`Embedded PostgreSQL could not open ${dir || 'the in-memory database'}: ${detail}. No database was reset. Stop other API processes and restore a known-good backup if recovery is needed.`), { code: 'PGLITE_STARTUP' });
+  } finally {
+    initializing = false;
+  }
+  let closing;
   const wrapClient = (c) => ({ query: async (sql, params = []) => { const r = await c.query(toPg(sql), params); return { rows: r.rows, count: r.affectedRows ?? r.rows.length }; } });
   return {
     kind: 'pglite',
     ...wrapClient(lite),
     exec: (sql) => lite.exec(sql),
     transaction: (fn) => lite.transaction((tx) => fn(wrapClient(tx))),
-    close: () => lite.close(),
+    close: () => closing ||= (async () => {
+      await lite.close();
+      release();
+    })(),
   };
 }
 

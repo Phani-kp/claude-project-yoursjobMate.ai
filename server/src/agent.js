@@ -152,26 +152,51 @@ export async function applySavedJobs(userId) {
 }
 
 /** Background loop: refresh jobs periodically and run the agent for every user with auto-apply on. */
+const agentLoops = new WeakMap();
 export function startAgent({ intervalMs = 60_000, syncEveryMs = process.env.SYNC_EVERY_MS === undefined || process.env.SYNC_EVERY_MS === '' ? 60 * 60_000 : Number(process.env.SYNC_EVERY_MS) } = {}) {
   let lastSync = 0;
-  const tick = async () => {
+  const state = { stopping: false, active: new Set() };
+  const runTick = async () => {
     try {
       // SYNC_EVERY_MS=0 turns in-app syncing off (when a scheduled job such as the GitHub Action does it instead).
       if (syncEveryMs > 0 && Date.now() - lastSync > syncEveryMs) {
         lastSync = Date.now();
         // Keyword-based sources (Adzuna, JSearch, USAJOBS) search for the job titles users are targeting.
         const terms = [...new Set((await db.all('SELECT p.titles FROM profiles p JOIN users u ON u.id = p.user_id WHERE u.verified = 1')).flatMap((p) => csv(p.titles).map((t) => t.toLowerCase())))];
+        if (state.stopping) return;
         const r = await syncJobs(terms);
         console.log(`[jobs] ${r.total} US jobs from ${r.sources} sources in ${r.seconds}s (+${r.added} new, ${r.updated} refreshed, ${r.removed} closed or expired)`, r.errors.length ? r.errors : '');
       }
+      if (state.stopping) return;
       // Only verified accounts: an unverified sign-up must never trigger applications.
       for (const { user_id } of await db.all('SELECT p.user_id FROM profiles p JOIN users u ON u.id = p.user_id WHERE p.auto_apply = 1 AND u.verified = 1')) {
+        if (state.stopping) break;
         await runAgentForUser(user_id);
       }
     } catch (e) {
       console.error('[agent]', e);
     }
   };
+  const tick = () => {
+    if (state.stopping) return;
+    const work = runTick().finally(() => state.active.delete(work));
+    state.active.add(work);
+  };
   tick();
-  return setInterval(tick, intervalMs);
+  const timer = setInterval(tick, intervalMs);
+  agentLoops.set(timer, state);
+  return timer;
+}
+
+/** Stop future ticks and finish background writes before the database is closed. */
+export async function stopAgent(timer) {
+  clearInterval(timer);
+  const state = timer && agentLoops.get(timer);
+  if (state) {
+    state.stopping = true;
+    await Promise.allSettled([...state.active]);
+    agentLoops.delete(timer);
+  }
+  // Includes detached "apply saved jobs" work accepted just before HTTP shutdown.
+  while (running.size) await new Promise((resolve) => setTimeout(resolve, 25));
 }

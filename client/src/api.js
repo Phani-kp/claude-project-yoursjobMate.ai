@@ -7,14 +7,26 @@ export const setToken = (t) => (t ? localStorage.setItem(TOKEN_KEY, t) : localSt
 export async function api(path, { method = 'GET', body, form } = {}) {
   const headers = { Authorization: `Bearer ${getToken() || ''}` };
   if (body) headers['Content-Type'] = 'application/json';
-  const res = await fetch(`/api${path}`, { method, headers, body: form || (body && JSON.stringify(body)) });
+  const options = { method, headers, body: form || (body && JSON.stringify(body)) };
+  let res;
+  try {
+    res = await fetch(`/api${path}`, options);
+  } catch (error) {
+    if (error instanceof TypeError) throw new Error('Unable to connect. Please check your connection and try again.', { cause: error });
+    throw error;
+  }
   if (res.status === 401 && !path.startsWith('/auth')) {
     setToken(null);
     window.location.assign('/login');
   }
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(data.error || `Request failed (${res.status})`), { status: res.status, data });
+  if (!res.ok) {
+    const fallback = [502, 503, 504].includes(res.status)
+      ? 'The service is temporarily unavailable. Please try again shortly.'
+      : `Request failed (${res.status})`;
+    throw Object.assign(new Error(data?.error || fallback), { status: res.status, data });
+  }
   return data;
 }
 

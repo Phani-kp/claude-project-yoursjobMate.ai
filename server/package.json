@@ -5,7 +5,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node --no-warnings --env-file-if-exists=.env src/index.js",
-    "dev": "node --no-warnings --env-file-if-exists=.env --watch src/index.js",
+    "dev": "node --no-warnings scripts/dev.js",
     "test": "node --no-warnings --test test/*.test.js",
     "mail:check": "node --no-warnings --env-file-if-exists=.env scripts/check-mail.js",
     "sync:jobs": "node --no-warnings --env-file-if-exists=.env scripts/sync-jobs.js",

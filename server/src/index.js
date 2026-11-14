@@ -5,7 +5,8 @@ import { createApp } from './app.js';
 import { verifyToken } from './auth.js';
 import { db } from './db.js';
 import { verifyMailer } from './mailer.js';
-import { setIo, startAgent } from './agent.js';
+import { setIo, startAgent, stopAgent } from './agent.js';
+import { createShutdown, installShutdownHandlers } from './lifecycle.js';
 
 const PORT = Number(process.env.PORT) || 4000;
 const app = createApp();
@@ -28,30 +29,31 @@ app.set('io', io);
 setIo(io);
 
 let agentTimer;
+const shutdown = createShutdown({
+  stopWork: () => stopAgent(agentTimer),
+  closeServer: () => new Promise((resolve, reject) => {
+    io.close((error) => {
+      if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+      else resolve();
+    });
+    server.closeIdleConnections();
+  }),
+  closeDatabase: () => db.close(),
+});
+installShutdownHandlers(shutdown);
+// The watcher waits for this before requesting shutdown, including during initial database startup.
+if (process.connected) process.send({ type: 'ready' }, () => {});
 server.on('error', (err) => {
-  if (err.code !== 'EADDRINUSE') throw err;
-  console.error(`
+  if (err.code === 'EADDRINUSE') console.error(`
 Port ${PORT} is already in use, probably by another copy of this server that is still running.
 Stop it (Ctrl+C in its terminal, or close that terminal), then start again. Or set PORT to a different number.
 `);
-  process.exit(1);
+  else console.error(`[server] Could not listen: ${err.message}`);
+  shutdown('Server startup failed', 1);
 });
 server.listen(PORT, () => {
+  if (process.connected) process.send({ type: 'listening', port: server.address().port }, () => {});
   console.log(`YoursJobMate API on http://localhost:${PORT} (${process.env.NODE_ENV || 'development'}, database: ${db.kind === 'postgres' ? 'PostgreSQL' : 'embedded Postgres (local dev)'})`);
   verifyMailer();
   agentTimer = startAgent({ intervalMs: Number(process.env.AGENT_INTERVAL_MS) || 60_000 });
 });
-
-// Hosts send SIGTERM on deploys and restarts: stop taking work, finish open requests, close the database.
-function shutdown(signal) {
-  console.log(`${signal} received, shutting down…`);
-  clearInterval(agentTimer);
-  // Closes the sockets and the HTTP server, waiting for open requests.
-  io.close(async () => {
-    await db.close().catch(() => {});
-    process.exit(0);
-  });
-  setTimeout(() => process.exit(1), 10_000).unref();
-}
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));

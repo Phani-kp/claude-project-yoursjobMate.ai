@@ -59,13 +59,21 @@ npm run setup
 npm run dev
 ```
 
-Open http://localhost:5173. The API runs on port 4000, and Vite proxies `/api` and the websocket to it.
+Open the frontend URL printed by `npm run dev` (normally http://localhost:5173). The launcher waits until the API is listening before serving the frontend. The API defaults to port 4000; Vite routes `/api` and WebSocket requests to its actual port, including after a restart or a `PORT` change in `server/.env`.
+
+While the API restarts or is unavailable, service requests return a clear JSON error. If the API fails during initial startup, fix the terminal error before trying again; a frontend page left over from another dev session cannot handle sign-up by itself.
 
 To configure the app, copy `server/.env.example` to `server/.env`. Set `ANTHROPIC_API_KEY` there to turn on AI cover letters.
 
 ### Database and email in development
 
 Without `DATABASE_URL`, data is saved in an embedded Postgres in `server/data/pgdata`. To copy accounts from an older SQLite version of the app into it, run `npm run migrate:sqlite` inside `server/` (with the dev server stopped).
+
+Run one API process per PGlite directory. The server takes an exclusive directory lock and reports an existing owner instead of opening the same database twice. `npm run dev` waits for database shutdown before restarting its API child, including on Windows. Stop it with Ctrl+C and wait for shutdown before starting another API or a script that opens the same database. Changing the API port does not give it a different database.
+
+The development watcher compares file contents before restarting. Metadata-only filesystem notifications and unchanged files do not interrupt the API; source and configuration edits restart it after the saved contents settle.
+
+The default directory is resolved relative to `server/`, whether you start from the repository root or `server/`. Optional `DB_PATH` selects another PGlite directory; relative paths are also resolved from `server/`. Pointing at another directory does not migrate existing accounts.
 
 **Optional: a real Postgres 17 server on your machine.** If you have [Docker](https://www.docker.com/products/docker-desktop/), run `docker compose up -d --wait` in the project root. It publishes port 5432 on localhost only. Then set this in `server/.env` and restart `npm run dev`:
 
@@ -78,6 +86,17 @@ The tables are created on first start. Data is kept in the named `pgdata` Compos
 `server/.env`, `.env.*` secret variants and `server/data/` are ignored by Git; environment examples remain tracked. Secret environment files and database files are also excluded from Docker builds. Keep API keys and database files there rather than adding them to tracked files.
 
 With no email service set, no email is sent: verification and reset codes are printed in the server terminal, so you can test the whole flow offline. To receive real emails, set up Brevo (below) or SMTP in `server/.env`.
+
+### Embedded database startup recovery
+
+If PGlite cannot start, the server includes PostgreSQL's startup error (such as a checkpoint failure) instead of showing only a WebAssembly `Aborted()` message. It does not reset the database automatically.
+
+1. Stop every API and API watcher for this repository and confirm their database child processes have exited.
+2. Preserve the entire PGlite directory before investigating. Keep the original and an untouched backup; never delete `pgdata` to resolve the error. Diagnostic tools must open disposable copies, since PostgreSQL startup recovery can write to a directory.
+3. Restore a known-good snapshot into a separate directory, or recover and validate data on a copy before exporting it into a separate clean cluster. Verify user IDs, password hashes, verification/session fields, profiles and foreign-key relationships. Keep `PASSWORD_PEPPER` unchanged so recovered password hashes still work.
+4. Select recovered storage only after validation and a clean close/reopen check. Retain the original, backups, diagnostic copies and recovery receipts under ignored `server/data/`; those artifacts can contain account data and must stay out of Git.
+
+Exclusive locking and graceful shutdown prevent overlapping processes from opening the same directory; they do not repair existing checkpoint damage. Recovery work is separate from normal app startup.
 
 ## Accounts and email
 
