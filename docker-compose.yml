@@ -1,0 +1,31 @@
+# Optional local PostgreSQL server for development.
+# The app works without this: when DATABASE_URL is empty it uses an embedded Postgres in server/data/pgdata.
+#
+#   docker compose up -d --wait     start Postgres in the background and wait until healthy
+#   docker compose down             stop it (your data is kept in the "pgdata" volume)
+#   docker compose down -v          stop it and DELETE all its data
+#
+# Then put this in server/.env and restart npm run dev:
+#   DATABASE_URL=postgresql://yoursjobmate:yoursjobmate@localhost:5432/yoursjobmate
+#
+# The password is for local development only. The port is bound to 127.0.0.1, so other machines can't reach it.
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-yoursjobmate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-yoursjobmate}
+      POSTGRES_DB: ${POSTGRES_DB:-yoursjobmate}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

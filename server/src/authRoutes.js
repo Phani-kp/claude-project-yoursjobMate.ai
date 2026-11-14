@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { rateLimit } from 'express-rate-limit';
 import { db } from './db.js';
 import { checkPassword, hashPassword, hmac, signToken } from './auth.js';
-import { mailEnabled, sendPasswordChangedEmail, sendPasswordResetEmail, sendVerificationEmail } from './mailer.js';
+import { logMailError, mailEnabled, sendPasswordChangedEmail, sendPasswordResetEmail, sendVerificationEmail } from './mailer.js';
 
 const OTP_TTL_MINUTES = 10;
 const OTP_RESEND_SECONDS = 60;
@@ -18,6 +18,7 @@ export const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name });
 const normEmail = (email) => String(email || '').trim().toLowerCase();
 const findUser = (email) => db.get('SELECT * FROM users WHERE email = ?', normEmail(email));
 const getUser = (id) => db.get('SELECT * FROM users WHERE id = ?', id);
+const publicError = (message, status, extra = {}) => Object.assign(new Error(message), { status, expose: true, ...extra });
 const passwordError = (p) =>
   typeof p !== 'string' || p.length < PASSWORD_MIN ? `Password must be at least ${PASSWORD_MIN} characters`
   : Buffer.byteLength(p) > PASSWORD_MAX ? `Password must be at most ${PASSWORD_MAX} characters`
@@ -33,41 +34,64 @@ const otpCooldown = (u, purpose) => (u.otp_purpose !== purpose ? 0
 const devCodes = new Map();
 const pendingDevCode = (u, purpose) => (u.otp_purpose === purpose ? devCodes.get(`${u.id}:${purpose}`) : undefined);
 /** Sends a new code unless one of this purpose was sent within the last minute. Returns the code only in development. */
-const sendOtpIfAllowed = async (u, purpose) => (otpCooldown(u, purpose) === 0 ? issueOtp(u, purpose) : pendingDevCode(u, purpose));
+const sendOtpIfAllowed = (u, purpose) => issueOtp(u, purpose);
 const otpHash = (userId, purpose, code) => hmac(`${userId}:${purpose}:${code}`);
 
 /**
  * Creates and emails a one-time code. Returns the code itself only when no email service is configured, which the
- * server allows in development only (production refuses to start without SMTP), so it can be shown on screen.
+ * server allows in development only (production refuses to start without Brevo or SMTP), so it can be shown on screen.
  */
-async function issueOtp(user, purpose) {
-  const code = String(crypto.randomInt(100000, 1000000));
-  const now = Date.now();
-  await db.run('UPDATE users SET otp_hash = ?, otp_purpose = ?, otp_expires_at = ?, otp_sent_at = ?, otp_attempts = 0 WHERE id = ?',
-    otpHash(user.id, purpose, code), purpose, now + OTP_TTL_MINUTES * 60_000, now, user.id);
+async function issueOtp(user, purpose, { strictCooldown = false, signup } = {}) {
+  // Lock the account while reserving a code: simultaneous requests share the same cooldown.
+  // Email delivery happens after commit, so a slow provider never holds a database lock.
+  const pending = await db.transaction(async (t) => {
+    const current = await t.get('SELECT * FROM users WHERE id = ? FOR UPDATE', user.id);
+    if (!current || (purpose === 'verify' && current.verified)) {
+      throw publicError('This email is already verified or has no pending sign-up. Try logging in.', 400);
+    }
+    const wait = otpCooldown(current, purpose);
+    if (wait) {
+      if (strictCooldown) throw publicError(`Please wait ${wait}s before requesting another code`, 429, { retryAfter: wait });
+      return { devCode: pendingDevCode(current, purpose) };
+    }
+    const code = String(crypto.randomInt(100000, 1000000));
+    const hash = otpHash(current.id, purpose, code);
+    const now = Date.now();
+    if (signup) {
+      // Pending credentials may change only together with a fresh verification code.
+      await t.run('UPDATE users SET name = ?, password_hash = ? WHERE id = ?', signup.name, signup.hash, current.id);
+      current.name = signup.name;
+    }
+    await t.run('UPDATE users SET otp_hash = ?, otp_purpose = ?, otp_expires_at = ?, otp_sent_at = ?, otp_attempts = 0 WHERE id = ?',
+      hash, purpose, now + OTP_TTL_MINUTES * 60_000, now, current.id);
+    return { user: current, code, hash };
+  });
+  if (!pending.code) return pending.devCode;
   try {
     const send = purpose === 'reset' ? sendPasswordResetEmail : sendVerificationEmail;
-    await send(user.email, user.name, code, OTP_TTL_MINUTES);
+    await send(pending.user.email, pending.user.name, pending.code, OTP_TTL_MINUTES);
   } catch (err) {
-    console.error(`[mail] failed to send ${purpose} code to user ${user.id}:`, err.message);
-    await db.run('UPDATE users SET otp_sent_at = NULL WHERE id = ?', user.id);
-    throw Object.assign(new Error("We couldn't send the email. Please try again in a moment."), { status: 502, expose: true });
+    logMailError(`failed to send ${purpose} code to user ${user.id}`, err);
+    // A failed, older send must not erase a newer code or its cooldown.
+    await db.run('UPDATE users SET otp_hash = NULL, otp_purpose = NULL, otp_expires_at = NULL, otp_sent_at = NULL WHERE id = ? AND otp_hash = ?', user.id, pending.hash);
+    devCodes.delete(`${user.id}:${purpose}`);
+    throw publicError("We couldn't send the email. Please try again in a moment.", 502, { mailDelivery: true });
   }
   if (mailEnabled()) return undefined;
-  devCodes.set(`${user.id}:${purpose}`, code);
-  return code;
+  devCodes.set(`${user.id}:${purpose}`, pending.code);
+  return pending.code;
 }
 
 /** Checks a submitted code. Returns an error response body, or null if the code is correct (and consumes it). */
-async function checkOtp(user, purpose, code) {
-  if (!user.otp_hash || user.otp_purpose !== purpose || Date.now() > user.otp_expires_at) return { status: 400, error: 'This code has expired. Request a new one.' };
+async function checkOtp(t, user, purpose, code) {
+  if (!user.otp_hash || user.otp_purpose !== purpose || Date.now() >= user.otp_expires_at) return { status: 400, error: 'This code has expired. Request a new one.' };
   if (user.otp_attempts >= OTP_MAX_ATTEMPTS) return { status: 429, error: 'Too many wrong attempts. Request a new code.' };
   if (!safeEqual(otpHash(user.id, purpose, String(code || '').trim()), user.otp_hash)) {
-    await db.run('UPDATE users SET otp_attempts = otp_attempts + 1 WHERE id = ?', user.id);
+    await t.run('UPDATE users SET otp_attempts = otp_attempts + 1 WHERE id = ?', user.id);
     const left = OTP_MAX_ATTEMPTS - user.otp_attempts - 1;
     return { status: 400, error: left > 0 ? `Incorrect code. ${left} attempt${left === 1 ? '' : 's'} left.` : 'Too many wrong attempts. Request a new code.' };
   }
-  await db.run('UPDATE users SET otp_hash = NULL, otp_purpose = NULL, otp_expires_at = NULL, otp_attempts = 0 WHERE id = ?', user.id);
+  await t.run('UPDATE users SET otp_hash = NULL, otp_purpose = NULL, otp_expires_at = NULL, otp_attempts = 0 WHERE id = ?', user.id);
   devCodes.delete(`${user.id}:${purpose}`);
   return null;
 }
@@ -100,8 +124,6 @@ export function authRouter() {
     const hash = await hashPassword(password);
     let id;
     if (existing) {
-      // Sign-up retried before verifying: take the new details and send a fresh code.
-      await db.run('UPDATE users SET name = ?, password_hash = ? WHERE id = ?', name, hash, existing.id);
       id = existing.id;
     } else {
       try {
@@ -116,25 +138,27 @@ export function authRouter() {
       }
     }
     const user = await getUser(id);
-    const devCode = await sendOtpIfAllowed(user, 'verify');
+    const devCode = await issueOtp(user, 'verify', { strictCooldown: true, signup: { name, hash } });
     res.status(201).json({ needsVerification: true, email, retryAfter: otpCooldown(await getUser(id), 'verify'), devCode });
   }));
 
   r.post('/verify', normal, wrap(async (req, res) => {
-    const user = await findUser(req.body?.email);
-    if (!user || user.verified) return res.status(400).json({ error: 'This email is already verified or has no pending sign-up. Try logging in.' });
-    const err = await checkOtp(user, 'verify', req.body?.code);
-    if (err) return res.status(err.status).json({ error: err.error });
-    await db.run('UPDATE users SET verified = 1 WHERE id = ?', user.id);
-    res.json({ token: signToken(user), user: publicUser(user) });
+    const result = await db.transaction(async (t) => {
+      const user = await t.get('SELECT * FROM users WHERE email = ? FOR UPDATE', normEmail(req.body?.email));
+      if (!user || user.verified) return { status: 400, error: 'This email is already verified or has no pending sign-up. Try logging in.' };
+      const err = await checkOtp(t, user, 'verify', req.body?.code);
+      if (err) return err;
+      await t.run('UPDATE users SET verified = 1 WHERE id = ?', user.id);
+      return { user };
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json({ token: signToken(result.user), user: publicUser(result.user) });
   }));
 
   r.post('/resend-otp', strict, wrap(async (req, res) => {
     const user = await findUser(req.body?.email);
     if (!user || user.verified) return res.status(400).json({ error: 'This email is already verified or has no pending sign-up. Try logging in.' });
-    const wait = otpCooldown(user, 'verify');
-    if (wait) return res.status(429).json({ error: `Please wait ${wait}s before requesting another code`, retryAfter: wait });
-    const devCode = await issueOtp(user, 'verify');
+    const devCode = await issueOtp(user, 'verify', { strictCooldown: true });
     res.json({ ok: true, retryAfter: OTP_RESEND_SECONDS, devCode });
   }));
 
@@ -155,7 +179,14 @@ export function authRouter() {
   // Always answers the same way, so it can't be used to find out who has an account.
   r.post('/forgot-password', strict, wrap(async (req, res) => {
     const user = await findUser(req.body?.email);
-    const devCode = user ? await sendOtpIfAllowed(user, 'reset') : undefined;
+    let devCode;
+    try {
+      devCode = user ? await sendOtpIfAllowed(user, 'reset') : undefined;
+    } catch (err) {
+      // Delivery problems must not reveal whether the address has an account.
+      // issueOtp has already logged the provider failure; database errors still propagate.
+      if (!err.mailDelivery) throw err;
+    }
     res.json({ ok: true, retryAfter: OTP_RESEND_SECONDS, devCode });
   }));
 
@@ -163,14 +194,18 @@ export function authRouter() {
     const { code, password } = req.body || {};
     const pwErr = passwordError(password);
     if (pwErr) return res.status(400).json({ error: pwErr });
-    const user = await findUser(req.body?.email);
-    if (!user) return res.status(400).json({ error: 'This code has expired. Request a new one.' });
-    const err = await checkOtp(user, 'reset', code);
-    if (err) return res.status(err.status).json({ error: err.error });
-    // The code proves the user owns the email, so this also verifies an unverified account.
-    await db.run('UPDATE users SET password_hash = ?, verified = 1, token_version = token_version + 1 WHERE id = ?', await hashPassword(password), user.id);
-    sendPasswordChangedEmail(user.email, user.name).catch((e) => console.error('[mail] password-changed notice failed:', e.message));
-    const updated = await getUser(user.id);
+    const result = await db.transaction(async (t) => {
+      const user = await t.get('SELECT * FROM users WHERE email = ? FOR UPDATE', normEmail(req.body?.email));
+      if (!user) return { status: 400, error: 'This code has expired. Request a new one.' };
+      const err = await checkOtp(t, user, 'reset', code);
+      if (err) return err;
+      // Consume the code, replace the password and revoke sessions in one transaction.
+      // The code proves email ownership, so it also verifies a pending account.
+      return { user: await t.get('UPDATE users SET password_hash = ?, verified = 1, token_version = token_version + 1 WHERE id = ? RETURNING *', await hashPassword(password), user.id) };
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    const updated = result.user;
+    sendPasswordChangedEmail(updated.email, updated.name).catch((err) => logMailError('password-changed notice failed', err));
     res.json({ token: signToken(updated), user: publicUser(updated) });
   }));
 

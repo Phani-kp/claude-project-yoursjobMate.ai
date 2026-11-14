@@ -5,7 +5,9 @@ import { useAuth } from '../App';
 
 const RESEND_SECONDS = 60;
 const PASSWORD_MIN = 8;
-// The server only sends the code back when it has no email service (development).
+// Production builds ignore development codes even if an API response contains one.
+const readDevCode = (data) => import.meta.env.DEV ? data.devCode || '' : '';
+
 function DevCode({ code }) {
   return (
     <div className="notice dev-code" role="status">
@@ -81,7 +83,7 @@ export default function Login() {
     setCooldown(data.retryAfter ?? RESEND_SECONDS);
     setDest(fromSignup ? '/profile' : '/');
     go('verify');
-    setDevCode(data.devCode || '');
+    setDevCode(readDevCode(data));
   };
 
   const submit = run(async () => {
@@ -101,8 +103,8 @@ export default function Login() {
   const resendVerify = run(async () => {
     const data = await api('/auth/resend-otp', { method: 'POST', body: { email: pendingEmail } });
     setCooldown(data.retryAfter || RESEND_SECONDS);
-    setDevCode(data.devCode || '');
-    setNotice(data.devCode ? '' : 'A new code is on its way.');
+    setDevCode(readDevCode(data));
+    setNotice(readDevCode(data) ? '' : 'A new code is on its way.');
   });
 
   const requestReset = run(async () => {
@@ -110,9 +112,9 @@ export default function Login() {
     const data = await api('/auth/forgot-password', { method: 'POST', body: { email } });
     setPendingEmail(email);
     setCooldown(data.retryAfter || RESEND_SECONDS);
-    setNotice(data.devCode ? '' : `If an account exists for ${email}, we've sent it a reset code.`);
+    setNotice(readDevCode(data) ? '' : `If an account exists for ${email}, we've sent it a reset code.`);
     if (mode !== 'reset') go('reset', { keepNotice: true });
-    setDevCode(data.devCode || '');
+    setDevCode(readDevCode(data));
   });
 
   const reset = run(async () => {
@@ -132,7 +134,7 @@ export default function Login() {
     card = (
       <form className="card auth-card" onSubmit={verify}>
         <h2>Check your email</h2>
-        {devCode ? <DevCode code={devCode} /> : <p className="muted small">We sent a 6-digit code to <strong>{pendingEmail}</strong>. It expires in 10 minutes.</p>}
+        {import.meta.env.DEV && devCode ? <DevCode code={devCode} /> : <p className="muted small">We sent a 6-digit code to <strong>{pendingEmail}</strong>. It expires in 10 minutes.</p>}
         <CodeInput value={code} onChange={setCode} />
         {messages}
         <button className="btn primary" disabled={busy || code.length !== 6}>{busy ? 'Verifying…' : 'Verify email'}</button>
@@ -155,7 +157,7 @@ export default function Login() {
     card = (
       <form className="card auth-card" onSubmit={reset}>
         <h2>Set a new password</h2>
-        {devCode ? <DevCode code={devCode} /> : <p className="muted small">Enter the code we emailed to <strong>{pendingEmail}</strong> and choose a new password.</p>}
+        {import.meta.env.DEV && devCode ? <DevCode code={devCode} /> : <p className="muted small">Enter the code we emailed to <strong>{pendingEmail}</strong> and choose a new password.</p>}
         <CodeInput value={code} onChange={setCode} />
         <label>New password<PasswordInput value={newPassword} onChange={(e) => setNewPassword(e.target.value)} minLength={PASSWORD_MIN} maxLength={128} autoComplete="new-password" required /></label>
         {messages}

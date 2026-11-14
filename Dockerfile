@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Build the React client ----
-FROM node:22.19-slim AS client
+FROM node:22-slim AS client
 WORKDIR /app/client
 COPY client/package.json client/package-lock.json ./
 RUN npm ci
@@ -9,13 +9,13 @@ COPY client/ ./
 RUN npm run build
 
 # ---- Install server production dependencies ----
-FROM node:22.19-slim AS server-deps
+FROM node:22-slim AS server-deps
 WORKDIR /app/server
 COPY server/package.json server/package-lock.json ./
 RUN npm ci --omit=dev
 
 # ---- Runtime ----
-FROM node:22.19-slim
+FROM node:22-slim
 # All data (accounts, profiles, resumes, applications) lives in the PostgreSQL database at DATABASE_URL,
 # so the container keeps no data of its own and can be replaced on every deploy.
 ENV NODE_ENV=production PORT=4000

@@ -8,6 +8,7 @@ else delete process.env.DATABASE_URL;
 process.env.APPLY_DELAY_MS = '0';
 delete process.env.ANTHROPIC_API_KEY;
 delete process.env.SMTP_HOST;
+delete process.env.BREVO_API_KEY;
 process.env.NODE_ENV = 'test';
 process.env.AUTH_RATE_LIMIT = '1000';
 

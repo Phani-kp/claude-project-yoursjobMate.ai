@@ -8,6 +8,7 @@ import { rateLimit } from 'express-rate-limit';
 import { csv, db, STATUSES } from './db.js';
 import { requireAuth } from './auth.js';
 import { authRouter, publicUser } from './authRoutes.js';
+import { validateProductionConfig } from './config.js';
 import { getJob, jobFacets, matchScore, parseFilters, searchJobs, syncBoards, syncJobs, withFit } from './jobs.js';
 import { discoverBoards, parseBoardUrl, verifyBoard } from './sources.js';
 import { ATS_LABELS, builtInBoards } from './companies.js';
@@ -28,6 +29,7 @@ const withText = (t) => t && { ...t, text: resumeToText(t.resume) };
 const toNumber = (v) => (typeof v === 'boolean' ? Number(v) : Math.trunc(Number(v)) || 0);
 
 export function createApp() {
+  validateProductionConfig();
   const app = express();
   // Behind a load balancer or reverse proxy (Render, Railway, Nginx…) set TRUST_PROXY=1 so rate limits see real client IPs.
   if (process.env.TRUST_PROXY) app.set('trust proxy', /^\d+$/.test(process.env.TRUST_PROXY) ? Number(process.env.TRUST_PROXY) : process.env.TRUST_PROXY);
@@ -305,7 +307,7 @@ export function createApp() {
   }
 
   app.use((err, req, res, _next) => {
-    if (err.expose) return res.status(err.status).json({ error: err.message });
+    if (err.expose) return res.status(err.status).json({ error: err.message, ...(err.retryAfter > 0 && { retryAfter: err.retryAfter }) });
     console.error(err);
     res.status(500).json({ error: 'Something went wrong' });
   });

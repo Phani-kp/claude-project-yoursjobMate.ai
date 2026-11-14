@@ -1,3 +1,4 @@
+import './startupConfig.js';
 import http from 'node:http';
 import { Server } from 'socket.io';
 import { createApp } from './app.js';

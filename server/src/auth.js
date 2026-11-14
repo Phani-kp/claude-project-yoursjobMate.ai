@@ -2,10 +2,9 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { db } from './db.js';
+import { validateAuthConfig } from './config.js';
 
-const prod = process.env.NODE_ENV === 'production';
-if (prod && !process.env.JWT_SECRET) throw new Error('JWT_SECRET must be set in production');
-if (prod && !process.env.PASSWORD_PEPPER) throw new Error('PASSWORD_PEPPER must be set in production');
+validateAuthConfig();
 const SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 // Secret key mixed into every password before hashing. It lives only in the server's environment, never in the
 // database, so a stolen copy of the database can't be used to guess passwords. Never change it once users exist.

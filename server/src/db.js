@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import pg from 'pg';
+import { validateDatabaseConfig } from './config.js';
 
 /**
  * PostgreSQL storage.
@@ -10,7 +11,7 @@ import pg from 'pg';
  * Queries use `?` placeholders, which are converted to Postgres's $1, $2…
  */
 
-if (process.env.NODE_ENV === 'production' && !process.env.DATABASE_URL) throw new Error('DATABASE_URL must be set in production');
+validateDatabaseConfig();
 
 // BIGINT and COUNT(*) come back as JS numbers (all our values fit safely).
 pg.types.setTypeParser(pg.types.builtins.INT8, Number);
@@ -24,9 +25,9 @@ async function connect() {
   if (process.env.DATABASE_URL) {
     const url = process.env.DATABASE_URL;
     if (/\[YOUR-PASSWORD\]/i.test(url)) throw new Error('DATABASE_URL still contains [YOUR-PASSWORD]: replace it (brackets included) with your database password');
-    // Cloud databases need an encrypted connection. If the URL doesn't say how (Supabase's don't), encrypt it anyway.
+    // Verify cloud TLS certificates by default; explicit URL TLS settings take precedence.
     const local = /@(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
-    const ssl = /[?&]sslmode=/.test(url) || local ? undefined : { rejectUnauthorized: false };
+    const ssl = /[?&](sslmode|sslrootcert|sslcert|sslkey)=/.test(url) || local ? undefined : { rejectUnauthorized: true };
     const pool = new pg.Pool({
       connectionString: url,
       ssl,

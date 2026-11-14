@@ -34,7 +34,7 @@ server/src/
   app.js           REST API routes, security headers, rate limits
   authRoutes.js    Sign-up, email verification, login, password reset
   auth.js          Sessions (JWT) and route protection
-  mailer.js        SMTP email and email templates
+  mailer.js        Email delivery (Brevo API or SMTP) and email templates
   db.js            PostgreSQL connection and schema
 server/scripts/
   migrate-sqlite.js  One-time copy of an old SQLite database into PostgreSQL
@@ -67,7 +67,17 @@ To configure the app, copy `server/.env.example` to `server/.env`. Set `ANTHROPI
 
 Without `DATABASE_URL`, data is saved in an embedded Postgres in `server/data/pgdata`. To copy accounts from an older SQLite version of the app into it, run `npm run migrate:sqlite` inside `server/` (with the dev server stopped).
 
-Without `SMTP_HOST` set, no email is sent: verification and reset codes are printed in the server terminal, so you can test the whole flow offline. To receive real emails locally, set the SMTP settings in `server/.env` (see [Accounts and email](#accounts-and-email)).
+**Optional: a real Postgres 17 server on your machine.** If you have [Docker](https://www.docker.com/products/docker-desktop/), run `docker compose up -d --wait` in the project root. It publishes port 5432 on localhost only. Then set this in `server/.env` and restart `npm run dev`:
+
+```
+DATABASE_URL=postgresql://yoursjobmate:yoursjobmate@localhost:5432/yoursjobmate
+```
+
+The tables are created on first start. Data is kept in the named `pgdata` Compose volume across restarts; `docker compose down` stops Postgres and preserves it. `docker compose down -v` deletes it. The credentials above are local development defaults; if you override `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_DB` for Compose, update `DATABASE_URL` to match. Accounts in the embedded database are not copied over automatically. To use PGlite again, leave `DATABASE_URL=` empty and restart the app.
+
+`server/.env`, `.env.*` secret variants and `server/data/` are ignored by Git; environment examples remain tracked. Secret environment files and database files are also excluded from Docker builds. Keep API keys and database files there rather than adding them to tracked files.
+
+With no email service set, no email is sent: verification and reset codes are printed in the server terminal, so you can test the whole flow offline. To receive real emails, set up Brevo (below) or SMTP in `server/.env`.
 
 ## Accounts and email
 
@@ -77,80 +87,140 @@ Without `SMTP_HOST` set, no email is sent: verification and reset codes are prin
 - **Rate limits** per IP: 10 sign-up/login/code requests per 15 minutes, 30 verify/reset attempts per 15 minutes, 300 API requests per minute.
 - **Passwords** need at least 8 characters. They are never stored: the database keeps only `bcrypt(HMAC-SHA256(PASSWORD_PEPPER, password))`. The pepper is a secret key kept in the server environment, not the database, so a stolen database alone can't be used to crack passwords.
 
+### Sending real email with Brevo (recommended)
+
+The server can send through [Brevo](https://www.brevo.com)'s HTTP API using an API key and a verified sender address. One app-owned sender sends codes to each user's email address from the sign-up or reset request; you do not configure a sender for every user. You can use a project or business address as the sender; no personal Gmail address or mailbox password is required. User accounts, password hashes and profiles stay in your configured Postgres database. Brevo receives the sender, recipient address and email contents needed for delivery.
+
+1. Create a free Brevo account.
+2. Under **Settings > Senders, Domains, IPs > Senders**, add a single sender address you control and complete the verification code Brevo emails to it. See [Brevo's sender setup guide](https://help.brevo.com/hc/en-us/articles/208836149-Create-a-new-sender-From-name-and-From-email).
+3. Under **SMTP & API > API Keys**, generate an API key and copy it when it is displayed. Grant **Transactional email: All** for sending and the app's scoped checks. **Account: Read** is not required by startup or `mail:check`. See [Brevo's API key guide](https://developers.brevo.com/docs/api-key-authentication) and [API permissions guide](https://help.brevo.com/hc/en-us/articles/40158277171474-About-API-key-permissions).
+4. In `server/.env`, set:
+   ```
+   BREVO_API_KEY=xkeysib-...
+   MAIL_FROM="YoursJobMate <the-sender-you-verified@example.com>"
+   ```
+5. If Brevo blocks the calling IP, authorize your trusted machine's public outbound IP using the steps below. Authorize your production host's outbound IP separately before deployment.
+6. From the repository root, run `npm --prefix server run mail:check`, then restart the server. Startup should show `[mail] Mode: Brevo API ready`; failures include Brevo's error message.
+7. Sign up with a recipient email address you can check (for example, Gmail), enter the received verification code, then try **Forgot password** for the same account. Recipients do not need to be configured as Brevo senders. If a message is missing, check spam, the server logs and Brevo's transactional email logs.
+
+If both `BREVO_API_KEY` and `SMTP_HOST` are set, Brevo is used. Leave `SMTP_HOST`, `SMTP_USER` and `SMTP_PASS` empty when using only Brevo. For better delivery to Gmail and other inboxes, authenticate your sending domain in Brevo (next section); successful API submission does not guarantee inbox placement.
+
+`mail:check` uses a scoped transactional API read and a [Brevo sandbox request](https://developers.brevo.com/docs/using-sandbox-mode) with `X-Sib-Sandbox: drop`. Brevo sends no email and creates no email log for this check. Success confirms API access and request format; it does not verify sender ownership or inbox delivery.
+
+For Brevo access errors:
+
+- **401 with `unrecognised IP address`:** As the account owner, open [Security > Authorized IPs](https://app.brevo.com/security/authorised_ips), click **Authorize IP addresses**, enter the trusted public outbound IPv4/IPv6 reported by Brevo for this machine or host, and confirm. You can also authorize a recognized entry in **Unauthorized IP addresses**. Keep IP security enabled. Local network or VPN changes can change your public IP; production must authorize every actual outbound IP used by the host. See [Brevo's IP authorization guide](https://help.brevo.com/hc/en-us/articles/5740111683858-Authorize-and-block-IP-addresses-for-API-and-SMTP-security).
+- **403 / `Access denied for resource`:** Edit the API key actually configured on the server and grant **Transactional email: All**; then rerun `mail:check`. Changing key permissions does not authorize a blocked IP.
+- **Sender errors or missing delivery:** Set `MAIL_FROM` to your exact verified sender, confirm its domain authentication and transactional sending status, and inspect **Transactional > Logs** after a real sign-up or reset. A successful sandbox check does not establish sender verification.
+
 ### Choosing an email provider
 
-For real users, send through a transactional email service, not a personal mailbox. Gmail limits you to about 500 emails a day, and codes from a personal address often land in spam. All of these work through the SMTP settings, and `server/.env.example` lists the exact values for each:
+The existing SMTP option remains available: set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` and `MAIL_FROM`, and leave `BREVO_API_KEY` empty. `server/.env.example` includes settings for these transactional email providers:
 
-| Provider | Free tier (check current pricing) | Notes |
-| --- | --- | --- |
-| [Resend](https://resend.com) | Yes | Simplest setup |
-| [Brevo](https://www.brevo.com) | Yes | |
-| [SendGrid](https://sendgrid.com) | Yes | |
-| [Amazon SES](https://aws.amazon.com/ses/) | Pay per email | Cheapest at large volume |
+| Provider | Delivery option |
+| --- | --- |
+| [Resend](https://resend.com) | SMTP |
+| [Brevo](https://www.brevo.com) | HTTP API or SMTP |
+| [SendGrid](https://sendgrid.com) | SMTP |
+| [Amazon SES](https://aws.amazon.com/ses/) | SMTP |
 
 Whichever you choose:
 
 1. Buy or use a domain you own (for example `yoursjobmate.com`).
-2. Add the domain in your provider's dashboard and create the DNS records it shows you (SPF, DKIM and ideally DMARC). This is what keeps your codes out of spam.
+2. Add the domain in your provider's dashboard and copy the DNS names, types and values it supplies to your DNS provider. For Brevo, follow its [domain authentication guide](https://help.brevo.com/hc/en-us/articles/12163873383186-Authenticate-your-domain-with-Brevo-Brevo-code-DKIM-DMARC) for its verification, DKIM and DMARC records, plus any other records it requests. Use your account's actual values and wait for Brevo to confirm authentication.
 3. Set `MAIL_FROM` to an address on that domain, such as `YoursJobMate <no-reply@yoursjobmate.com>`.
-4. Start the server and look for `[mail] SMTP ready` in the logs. If the login fails you'll see `[mail] SMTP check failed` with the reason.
+4. Start the server and look for `[mail] Mode: Brevo API ready` or `[mail] Mode: SMTP ready` in the logs. If the key or login is wrong, the log line says the check failed and gives the reason.
 
 ## Deploy to production
 
-The app runs as a single Node process that serves both the API and the built website. Every user's data (account, profile, resume file, applications) is saved in a **cloud PostgreSQL database**, so the server itself keeps nothing on disk.
+The default deployment is one Node service serving the built React website, `/api` and `/socket.io` from the same HTTPS origin. Accounts, profiles, resumes and applications live in the PostgreSQL database selected by `DATABASE_URL`. Deploy one app instance initially: rate limits and the background application agent currently run in that process.
 
-### 1. Create the cloud database
+The repository supplies the database connection, email delivery and production build. You still need to create the hosting and database accounts, configure your sender and DNS, add runtime secrets, and complete a real delivery check before publishing.
 
-Any PostgreSQL provider works. [Neon](https://neon.tech) and [Supabase](https://supabase.com) both have free tiers:
+### 1. Create the shared hosted database
 
-1. Sign up and create a project, choosing a region close to where you'll host the app.
-2. Copy its **connection string** (Neon: *Connect*; Supabase: *Connect → Session pooler*). It looks like `postgresql://user:password@host/dbname?sslmode=require`.
-3. Put it in `DATABASE_URL`. The server creates all the tables itself on first start.
+1. Create a persistent PostgreSQL database with your chosen host, such as [Neon](https://neon.tech) or [Supabase](https://supabase.com), near your app's hosting region.
+2. Copy its server connection string and follow the provider's TLS and certificate authority (CA) instructions. Put the actual value in the app host's **server runtime** `DATABASE_URL` secret. All app instances must use the same database.
+3. Enable backups and confirm you can restore them. The app creates its tables on startup; production rejects an empty or malformed URL and known placeholder patterns such as `[YOUR-PASSWORD]` or `change-me`.
 
-You can see your users' data any time in the provider's table editor. Passwords appear only as `pep1$…` hashes.
+For cloud URLs without explicit TLS options, the app enables TLS with certificate verification. URL options such as `sslmode`, `sslrootcert`, `sslcert` and `sslkey` take precedence; use the provider's supported settings and CA files when needed. Resolve certificate failures using its TLS instructions instead of globally disabling verification. See [node-postgres TLS configuration](https://node-postgres.com/features/ssl).
 
-To bring over accounts from the old local SQLite database, run this once before real users sign up:
+PGlite and `docker-compose.yml` are local development options. Deploying a new app container must not create a fresh local account database. Existing PGlite accounts are not migrated automatically; arrange a data migration if those accounts must be kept. Preserve the password pepper used to create any accounts you migrate.
+
+For the older SQLite version, the existing `npm --prefix server run migrate:sqlite` command can copy its accounts after you configure `DATABASE_URL`; it does not migrate PGlite.
+
+### 2. Configure your business sender
+
+1. Add a domain you own to Brevo and authenticate it using the exact DNS records supplied in your Brevo dashboard. Do not use example DNS values or attempt to authenticate `gmail.com`.
+2. Create one sender on that domain, for example `YoursJobMate <no-reply@example.com>` with your real business domain replacing `example.com`. Complete sender verification and confirm transactional sending is enabled for the account.
+3. Generate a Brevo API key under **SMTP & API > API Keys** with **Transactional email: All**. Save it as the app host's server runtime `BREVO_API_KEY` secret, and set `MAIL_FROM` to that verified sender. Keep `SMTP_HOST`, `SMTP_USER` and `SMTP_PASS` empty when using Brevo alone.
+4. In [Brevo's Authorized IPs](https://app.brevo.com/security/authorised_ips), authorize the production host's trusted outbound IP addresses. Confirm the host's egress addresses with your provider; authorizing a local development IP does not authorize the deployed server.
+
+Every sign-up verification and password reset uses this sender and the requesting user's recipient address. Users do not need a Brevo account or any mailbox password in your app.
+
+### 3. Set stable server configuration
+
+Set these in the host's **server runtime environment**, rather than frontend build settings:
+
+| Setting | Value or requirement |
+| --- | --- |
+| `NODE_ENV` | `production` |
+| `DATABASE_URL` | Your shared hosted Postgres connection string; no development or placeholder credentials |
+| `JWT_SECRET` | An independent random value of at least 32 characters; keep stable across deploys and instances |
+| `PASSWORD_PEPPER` | A different random value of at least 32 characters; preserve it permanently once users exist |
+| `BREVO_API_KEY` | Your Brevo API key |
+| `MAIL_FROM` | Your single verified business sender, including its actual email address |
+| `PORT` | The port supplied by the host, or `4000` if it does not supply one |
+| `TRUST_PROXY` | The host's actual trusted proxy hop count or trusted IP/subnet list; leave empty for a direct connection |
+| `CORS_ORIGIN` | Empty for the default same-origin deployment; exact allowed frontend origins if your architecture requires CORS |
+
+Generate each secret separately with:
 
 ```bash
-cd server
-DATABASE_URL="postgresql://…" npm run migrate:sqlite
+node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 ```
 
-### 2. Run the app
+Production rejects missing or short authentication secrets, equal secrets, and known placeholder patterns such as `change-me` and `dev-secret`. Store both secrets in your host's secret manager and keep secure backups. Never generate new values on each deploy. Changing `JWT_SECRET` signs users out and invalidates pending codes; changing `PASSWORD_PEPPER` prevents existing passwords from working.
 
-### With Docker (Render, Railway, Fly.io, a VPS…)
+Keep `DATABASE_URL`, `JWT_SECRET`, `PASSWORD_PEPPER` and `BREVO_API_KEY` out of `client/.env`, `VITE_*` variables, source code and Docker build arguments. [Vite embeds `VITE_*` values into browser bundles](https://vite.dev/guide/env-and-mode#env-variables), so those values are public. Local `server/.env` remains ignored by Git.
+
+Confirm the proxy topology with your hosting provider before setting `TRUST_PROXY`: `1` means exactly one trusted hop, and is not a universal hosting default. The trusted proxy must overwrite forwarded headers. See [Express's proxy configuration guide](https://expressjs.com/en/guide/behind-proxies/).
+
+### 4. Build and host over HTTPS
+
+For a managed container host, deploy this repository's `Dockerfile`, set the server runtime variables above, and route your HTTPS domain to the container's `PORT`. The Dockerfile uses `node:22-slim`, builds the client and starts the Express server; configure `GET /api/health` as the health check. Enable WebSocket forwarding for Socket.IO.
+
+For a VPS, build the image and run it behind your HTTPS reverse proxy after you put the production values in the ignored `server/.env` file:
 
 ```bash
 docker build -t yoursjobmate .
-docker run -d -p 4000:4000 --env-file server/.env -e NODE_ENV=production yoursjobmate
+docker run -d -p 127.0.0.1:4000:4000 --env-file server/.env -e NODE_ENV=production yoursjobmate
 ```
 
-On a hosting platform, point it at this repository's `Dockerfile` and set the environment variables below. No disk or volume is needed. Health checks can use `GET /api/health`, which also checks the database connection.
-
-### Without Docker
+To deploy without Docker, install dependencies and build from the repository root:
 
 ```bash
-npm run setup
+npm --prefix server ci --omit=dev
+npm --prefix client ci --include=dev
 npm run build
-NODE_ENV=production npm start
+npm start
 ```
 
-### Production checklist
+Set `NODE_ENV=production` and the other runtime variables in the host before running `npm start`. Keep `client/dist` with the server: Express serves it automatically. Your host or reverse proxy must provide HTTPS for the public domain and forward requests to Express, including `/api` and `/socket.io`.
 
-| Setting | Why |
-| --- | --- |
-| `NODE_ENV=production` | Turns on the production checks below and closes CORS |
-| `DATABASE_URL` | **Required.** Your cloud PostgreSQL connection string |
-| `JWT_SECRET` | **Required.** A long random string (see `.env.example` for a command to generate one) |
-| `PASSWORD_PEPPER` | **Required.** A different long random string. Never change it once users exist, and keep a backup copy: without it nobody can log in |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | **Required.** The server won't start without `SMTP_HOST` in production |
-| `TRUST_PROXY=1` | Needed on almost every host so rate limits see real visitor IPs instead of the proxy's |
-| HTTPS | Provided by your host or a proxy such as Cloudflare or Caddy. Never serve logins over plain HTTP |
-| Backups | Turn on your provider's automatic backups / point-in-time restore |
+The bundled client uses relative `/api` requests and same-origin Socket.IO. If you host static frontend files separately, configure that frontend domain's proxy to forward `/api` and `/socket.io` to the server. Merely setting `CORS_ORIGIN` does not change the client's API destination; separate API base URLs require a client change.
+
+### 5. Verify the published flows
+
+1. Check `https://<your-app-domain>/api/health` returns `ok: true` and `db: "postgres"`.
+2. Run `npm --prefix server run mail:check` in the deployed runtime and confirm startup logs show `[mail] Mode: Brevo API ready`. These check scoped API access and sandbox request format; they do not prove that your sender is verified or a message reached an inbox.
+3. Sign up with an inbox you control, receive the verification email from your business sender, enter its code, and log in. Try another recipient address to confirm recipients come from user requests.
+4. Use **Forgot password**, receive and use its reset code, then confirm the new password works and the old password and old sessions fail. Restart or redeploy the app and verify the account still works.
+5. For a missing message, check server provider errors and **Brevo > Transactional > Logs** for the recipient and message status. API acceptance means Brevo accepted the request; even a `Delivered` event means the recipient mail server accepted the email, which can still land in spam or another folder. See [Brevo's log guide](https://help.brevo.com/hc/en-us/articles/360021533839-Manage-your-transactional-logs-and-email-previews) and [delivery status explanation](https://help.brevo.com/hc/en-us/articles/35699922048146-View-and-export-your-event-logs).
 
 ### Scaling beyond one server
 
-The database already supports many server instances. The remaining single-instance pieces are the in-memory rate limits, Socket.IO live updates and the auto-apply loop: before running several instances behind a load balancer, move rate limits and Socket.IO state to Redis and run the agent as a separate worker (see the roadmap).
+Before running several app instances, use a shared rate-limit store, coordinate Socket.IO state and move the background agent into a separately scheduled worker so several instances do not process the same applications. A shared Postgres connection alone does not coordinate these pieces.
 
 ## Keeping jobs fresh 24/7
 
@@ -167,6 +237,8 @@ When the Action is running, you can set `SYNC_EVERY_MS=0` on the web server so i
 ```bash
 npm test
 ```
+
+The mailer tests mock `fetch` to check Brevo requests, provider errors and delivery mode selection without sending real emails. API tests use in-memory PGlite by default; `TEST_DATABASE_URL` optionally selects a separate, empty Postgres database.
 
 ## Step-by-step guide: how it works
 
