@@ -1,0 +1,46 @@
+# ==============================================================================
+#  YoursJobMate: what to install before running the app
+# ==============================================================================
+#  This is a Node.js project, not a Python one. Nothing here is installed with
+#  pip. Every line is a comment so Python tools that read this file do nothing.
+#
+#  REQUIRED
+#  --------
+#  1. Node.js 22.13 or newer (the LTS release is recommended). npm comes with it.
+#       Windows : winget install OpenJS.NodeJS.LTS
+#       macOS   : brew install node@22
+#       Linux   : https://nodejs.org/en/download (or use nvm)
+#       Any OS  : https://nodejs.org
+#     Check it : node -v    (must print v22.13.0 or higher)
+#                npm -v
+#     On Windows, close and reopen VS Code and your terminals after installing
+#     so they pick up the new PATH.
+#
+#  2. Git, to clone the repository: https://git-scm.com/downloads
+#
+#  NOT NEEDED FOR LOCAL DEVELOPMENT
+#  --------------------------------
+#  - PostgreSQL: if DATABASE_URL is left empty, the app uses an embedded
+#    database (PGlite) stored in server/data/pgdata.
+#  - An email server: if SMTP_HOST is left empty, sign-up and password-reset
+#    codes are printed in the server terminal.
+#
+#  NEEDED ONLY FOR PRODUCTION (set these in server/.env or on your host)
+#  ---------------------------------------------------------------------
+#  - A cloud PostgreSQL database (Neon, Supabase, RDS...) -> DATABASE_URL
+#  - An SMTP email provider (Resend, Brevo, SendGrid...)  -> SMTP_* settings
+#  - JWT_SECRET and PASSWORD_PEPPER: two long random strings
+#  - Optional: Docker, if you deploy with the Dockerfile
+#
+#  JavaScript packages (Express, React, Vite...) are listed in the package.json
+#  files and installed by the setup command below. Don't install them by hand.
+#
+#  FIRST-TIME SETUP (run from the project root)
+#  --------------------------------------------
+#     Windows : Copy-Item server\.env.example server\.env
+#     mac/Linux: cp server/.env.example server/.env
+#     npm run setup      # installs root, server and client dependencies
+#     npm run dev        # API on http://localhost:4000, web app on http://localhost:5173
+#
+#  See README.md for full details.
+# ==============================================================================
