@@ -7,15 +7,19 @@ import http from 'node:http';
 import { once } from 'node:events';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { acquireDataDirectoryLock } from '../src/dataDirectoryLock.js';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
-async function launch(t, invalid = false) {
+async function launch(t, invalid = false, locked = false) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'yoursjobmate-launcher-test-'));
   const database = path.join(temporary, 'pgdata');
   if (invalid) {
     fs.mkdirSync(database);
     fs.writeFileSync(path.join(database, 'PG_VERSION'), '999');
   }
+  const release = locked ? acquireDataDirectoryLock(database) : undefined;
+  if (locked) fs.writeFileSync(path.join(database, 'preserve.txt'), 'existing account database');
+  const originalLock = locked ? fs.readFileSync(`${database}.yoursjobmate.lock`, 'utf8') : undefined;
   const probe = http.createServer().listen(0, '127.0.0.1');
   await once(probe, 'listening');
   const port = probe.address().port;
@@ -33,19 +37,21 @@ async function launch(t, invalid = false) {
   child.stdout.on('data', (data) => { output = (output + data).slice(-6000); });
   child.stderr.on('data', (data) => { output = (output + data).slice(-6000); });
   child.on('message', (message) => messages.push(message));
-  const exited = once(child, 'exit');
+  // Stdio may finish after exit; wait for close before inspecting diagnostics.
+  const exited = once(child, 'close');
   t.after(async () => {
     if (child.exitCode === null && child.signalCode === null && child.connected) child.send({ type: 'shutdown' });
     await Promise.race([exited, new Promise((_, reject) => {
       const timer = setTimeout(() => reject(new Error('Launcher did not close its isolated test database')), 45_000);
       timer.unref();
     })]);
+    release?.();
     assert.equal(fs.existsSync(`${database}.yoursjobmate.lock`), false);
     assert.equal(path.dirname(temporary), fs.realpathSync(os.tmpdir()));
     assert.ok(path.basename(temporary).startsWith('yoursjobmate-launcher-test-'));
     fs.rmSync(temporary, { recursive: true, force: true });
   });
-  return { child, exited, messages, port, database, output: () => output };
+  return { child, exited, messages, port, database, originalLock, output: () => output };
 }
 
 test('the complete dev launcher waits for a listening API and proxies signup to its actual non-default port', async (t) => {
@@ -80,4 +86,17 @@ test('the dev launcher exits clearly when the API fails before listening instead
   assert.equal(running.messages.some((message) => message.type === 'dev-ready'), false);
   assert.match(running.output(), /API exited before it began listening/);
   assert.equal(fs.readFileSync(path.join(running.database, 'PG_VERSION'), 'utf8'), '999');
+});
+
+test('a second dev launcher explains the live database owner without opening storage or starting a frontend', async (t) => {
+  const running = await launch(t, false, true);
+  const [code] = await running.exited;
+  assert.equal(code, 1);
+  assert.equal(running.messages.some((message) => message.type === 'dev-ready'), false);
+  assert.match(running.output(), new RegExp(`process ${process.pid}`));
+  assert.match(running.output(), /Ctrl\+C/);
+  assert.doesNotMatch(running.output(), /API exited before it began listening/);
+  assert.equal(fs.readFileSync(`${running.database}.yoursjobmate.lock`, 'utf8'), running.originalLock);
+  assert.equal(fs.readFileSync(path.join(running.database, 'preserve.txt'), 'utf8'), 'existing account database');
+  assert.deepEqual(fs.readdirSync(running.database), ['preserve.txt'], 'the second launcher must not initialize PGlite');
 });

@@ -217,7 +217,7 @@ test('tailored resumes use the standard format and never keep claims the resume 
   assert.equal(t.ai, true);
   const provenText = JSON.stringify({ ...t.resume, sections: t.resume.sections.filter((s) => s.title !== 'Professional Development') });
   assert.ok(!/kubernetes|aws/i.test(provenText), `unsupported claims removed from proven sections: ${provenText}`);
-  assert.deepEqual(t.resume.skills, ['React', 'TypeScript']);
+  for (const skill of ['React', 'TypeScript', 'JavaScript']) assert.ok(t.resume.skills.includes(skill), `preserves supported skill ${skill}`);
   assert.equal(t.resume.summary, 'Frontend engineer with React and TypeScript.');
   assert.deepEqual(t.removed.sort(), ['aws', 'kubernetes']);
   // Standard order, titles and date style, whatever order the AI used.
@@ -258,14 +258,15 @@ test('tailored resumes use the standard format and never keep claims the resume 
   assert.equal(fit.gap, null);
   assert.ok(fit.resume.skills.includes('TypeScript'), 'a skill mentioned only in a bullet is surfaced in Skills');
 
-  // Missing skills are listed openly for verification (which ATS software counts), never as skills already held.
+  // Learning is listed openly and remains separate from demonstrated proficiency.
   const learn = await tailorResume({ resumeText, profile: {}, user: { name: 'Sam Lee', email: 'sam@example.com' }, job, learningSkills: ['kubernetes', 'aws', 'cobol'] });
   const dev = learn.resume.sections.find((x) => x.title === 'Professional Development');
   assert.ok(dev && /Kubernetes/.test(dev.items[0].bullets[0]) && /AWS/.test(dev.items[0].bullets[0]));
   assert.ok(!/cobol/i.test(JSON.stringify(learn.resume)), 'only skills the job asks for can be added');
   assert.ok(!learn.resume.skills.some((x) => /kubernetes|aws/i.test(x)), 'learning skills stay out of the Skills list');
   assert.equal(learn.resume.sections.at(-1).title, 'Professional Development');
-  assert.ok(learn.after.score >= 85, `automatic keyword targeting reaches the target: ${learn.after.score}`);
+  assert.ok(learn.after.score < 85, `learning must not manufacture proficiency: ${learn.after.score}`);
+  assert.ok(learn.after.missing.includes('kubernetes') && learn.after.missing.includes('aws'));
 });
 
 test('ATS score for a job, tailoring with confirmed skills and the Word download', async () => {

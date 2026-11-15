@@ -156,6 +156,9 @@ CREATE TABLE IF NOT EXISTS profiles (
   min_match INTEGER DEFAULT 60
 );
 
+-- User-authored projects, work and coursework omitted from the uploaded resume.
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS resume_evidence TEXT DEFAULT '[]';
+
 CREATE TABLE IF NOT EXISTS jobs (
   id SERIAL PRIMARY KEY,
   external_id TEXT UNIQUE NOT NULL,

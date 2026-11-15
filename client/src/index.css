@@ -317,3 +317,29 @@ label.check.big { font-size: 15px; }
 .ats-cell { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .job-link b { color: var(--primary); }
 .job-link:hover b { text-decoration: underline; }
+
+/* Resume tailoring: one main action, a readable document, and optional review tools. */
+.resume-tailor .ats-score { background: var(--surface); }
+.resume-tailor .resume-main-actions { margin-top: 0; }
+.resume-tailor .resume-preview > h3 { font-size: 16px; margin: 4px 0 12px; }
+.resume-tailor .resume-document { max-width: 860px; margin: 0 auto; padding: clamp(18px, 3vw, 34px); background: #fff; color: #202733; border: 1px solid #dfe3e8; border-radius: 6px; box-shadow: 0 3px 14px #00000012; font-family: Arial, Helvetica, sans-serif; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.resume-tailor .resume-document header { border-bottom: 1px solid #dfe3e8; padding-bottom: 12px; margin-bottom: 18px; }
+.resume-tailor .resume-document header h3 { color: #172033; font-size: 26px; line-height: 1.15; margin: 0 0 6px; }
+.resume-tailor .resume-document p { margin: 5px 0; }
+.resume-tailor .resume-document .resume-headline { font-size: 15px; font-weight: 600; }
+.resume-tailor .resume-document .resume-contact { color: #536070; font-size: 11px; }
+.resume-tailor .resume-document section + section { margin-top: 18px; }
+.resume-tailor .resume-document h4 { color: #253246; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; border-bottom: 1px solid #dfe3e8; padding-bottom: 4px; margin: 0 0 8px; }
+.resume-tailor .resume-role + .resume-role { margin-top: 14px; }
+.resume-tailor .resume-role-heading { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; }
+.resume-tailor .resume-role-heading > span { color: #536070; font-size: 11px; }
+.resume-tailor .resume-document .resume-role-subheading { color: #536070; margin-top: 1px; }
+.resume-tailor .resume-document ul { margin: 6px 0 0; padding-left: 19px; }
+.resume-tailor .resume-document li { margin: 3px 0; }
+.resume-tailor .resume-plain { white-space: pre-wrap; font: inherit; margin: 0; }
+.resume-tailor .resume-disclosure { border-top: 1px solid var(--border); padding-top: 12px; }
+.resume-tailor .resume-disclosure > summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.resume-tailor .resume-disclosure-content { margin-top: 12px; }
+.resume-tailor .resume-disclosure-content h5 { margin: 0 0 6px; }
+.resume-tailor .resume-skill-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 14px; }
+.resume-tailor .resume-skill-options label { font-size: 13px; }

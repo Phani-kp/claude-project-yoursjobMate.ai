@@ -12,7 +12,7 @@ export function selectResumeReport(original, tailored) {
 export function mergeOriginalReport(original, tailored) {
   const before = tailored?.report?.before;
   return before && typeof before === 'object' && !Array.isArray(before)
-    ? { ...original, ...before, hasResume: original?.hasResume ?? true }
+    ? { ...original, ...before, ...(tailored?.report?.skillChoices ? { skillChoices: tailored.report.skillChoices } : {}), hasResume: original?.hasResume ?? true }
     : original;
 }
 

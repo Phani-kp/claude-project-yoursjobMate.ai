@@ -9,12 +9,14 @@ import { csv, db, STATUSES } from './db.js';
 import { requireAuth } from './auth.js';
 import { authRouter, publicUser } from './authRoutes.js';
 import { validateProductionConfig } from './config.js';
-import { getJob, jobFacets, matchScore, parseFilters, searchJobs, syncBoards, syncJobs, withFit } from './jobs.js';
+import { ensureJobDetails, getJob, jobFacets, matchScore, parseFilters, searchJobs, syncBoards, syncJobs, withFit } from './jobs.js';
 import { discoverBoards, parseBoardUrl, verifyBoard } from './sources.js';
 import { ATS_LABELS, builtInBoards } from './companies.js';
 import { aiEnabled } from './ai.js';
-import { applySavedJobs, applyToJob, getApplication, getProfile, getTailoredResume, logEvent, runAgentForUser, tailorForJob, updateApplication } from './agent.js';
-import { atsReport, detectResumeProfile, extractResumeText, resumeToDocx, resumeToText } from './resume.js';
+import { applySavedJobs, applyToJob, getApplication, getProfile, getSavedResumeChoices, getTailoredResume, isTailoredReportCurrent, logEvent, runAgentForUser, tailorForJob, updateApplication } from './agent.js';
+import { atsReport, detectResumeProfile, extractResumeText, getResumeInputFingerprint, RESUME_SCORING_VERSION, resumeToDocx, resumeToText } from './resume.js';
+import { normalizeExperienceEntries } from './resumeExperience.js';
+import { buildEvidenceMap } from './resumeEvidence.js';
 
 // Resumes are kept in the database (not on the server's disk), so every server instance sees them.
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -73,6 +75,19 @@ export function createApp() {
     if (keys.length) await db.run(`UPDATE profiles SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE user_id = ?`, ...keys.map((k) => fields[k]), req.user.id);
     if ('auto_apply' in fields) await logEvent(req.user.id, null, 'agent', fields.auto_apply ? 'Auto-apply agent turned on' : 'Auto-apply agent paused');
     res.json(await getProfile(req.user.id));
+  }));
+
+  app.get('/api/profile/resume-experience', wrap(async (req, res) => {
+    const profile = await getProfile(req.user.id);
+    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+    res.json({ entries: profile.resume_evidence });
+  }));
+
+  app.put('/api/profile/resume-experience', wrap(async (req, res) => {
+    const entries = normalizeExperienceEntries(req.body?.entries, { strict: true });
+    const { count } = await db.run('UPDATE profiles SET resume_evidence = ? WHERE user_id = ?', JSON.stringify(entries), req.user.id);
+    if (!count) return res.status(404).json({ error: 'Profile not found' });
+    res.json({ entries });
   }));
 
   app.post('/api/profile/resume', upload.single('resume'), wrap(async (req, res) => {
@@ -146,12 +161,20 @@ export function createApp() {
   // ---- Saved jobs ----
   app.get('/api/saved', wrap(async (req, res) => {
     const rows = await db.all(`SELECT j.id, j.title, j.company, j.location, j.city, j.states, j.remote, j.salary, j.url, j.source, j.posted_ts AS posted_at, s.created_at AS saved_at,
-        a.id AS application_id, a.status AS application_status, t.ats_before, t.ats_after
+        a.id AS application_id, a.status AS application_status, t.ats_before, t.ats_after,
+        j.description AS tailored_job_description, j.tags AS tailored_job_tags, t.report AS tailored_report
       FROM saved_jobs s JOIN jobs j ON j.id = s.job_id
       LEFT JOIN applications a ON a.job_id = j.id AND a.user_id = s.user_id
       LEFT JOIN tailored_resumes t ON t.job_id = j.id AND t.user_id = s.user_id
       WHERE s.user_id = ? ORDER BY s.created_at DESC`, req.user.id);
-    res.json(rows.map((r) => ({ ...r, remote: !!r.remote, saved: true, states: (r.states || '').split(',').filter(Boolean) })));
+    const [profile, user] = rows.some((row) => row.tailored_report) ? await Promise.all([
+      getProfile(req.user.id), db.get('SELECT id, name, email FROM users WHERE id = ?', req.user.id),
+    ]) : [];
+    res.json(rows.map(({ tailored_job_description: description, tailored_job_tags: tags, tailored_report: report, ...row }) => {
+      const current = isTailoredReportCurrent(report, { resumeText: profile?.resume_text, profile, user, job: { ...row, description, tags } });
+      return { ...row, ats_before: current ? row.ats_before : null, ats_after: current ? row.ats_after : null,
+        remote: !!row.remote, saved: true, states: (row.states || '').split(',').filter(Boolean) };
+    }));
   }));
 
   app.post('/api/saved/apply-all', wrap(async (req, res) => {
@@ -182,17 +205,35 @@ export function createApp() {
 
   // ---- ATS check and tailored resume for one job ----
   app.get('/api/jobs/:id/ats', wrap(async (req, res) => {
-    const job = await db.get('SELECT * FROM jobs WHERE id = ?', toNumber(req.params.id));
+    const jobId = toNumber(req.params.id);
+    await ensureJobDetails(jobId);
+    const job = await db.get('SELECT * FROM jobs WHERE id = ?', jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
-    const { resume_text: text } = await getProfile(req.user.id);
-    res.json({ hasResume: (text || '').trim().length >= 50, ...atsReport(text, job), tailored: withText(await getTailoredResume(req.user.id, job.id)) || null });
+    const [profile, user, skillChoices] = await Promise.all([
+      getProfile(req.user.id), db.get('SELECT id, name, email FROM users WHERE id = ?', req.user.id),
+      getSavedResumeChoices(req.user.id, jobId),
+    ]);
+    const text = profile?.resume_text;
+    const inputs = { resumeText: text, profile, user, job };
+    const knownSkills = [...new Set(buildEvidenceMap({ resumeText: text, profile, job })
+      .filter(row => ['demonstrated', 'confirmed'].includes(row.status)).map(row => row.keyword))];
+    res.json({ hasResume: (text || '').trim().length >= 50, ...atsReport(text, job),
+      inputFingerprint: getResumeInputFingerprint(inputs), scoringVersion: RESUME_SCORING_VERSION, skillChoices, knownSkills,
+      tailored: withText(await getTailoredResume(req.user.id, job.id, inputs)) || null });
   }));
 
   const tailorLimit = rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'You have tailored a lot of resumes recently. Please wait a few minutes.' } });
   app.post('/api/jobs/:id/tailor', tailorLimit, wrap(async (req, res) => {
-    const list = (v) => (Array.isArray(v) ? v.slice(0, 30).map(String) : []);
-    const confirmed = list(req.body?.confirmedSkills);
-    const learning = list(req.body?.learningSkills);
+    const list = key => {
+      if (!Object.hasOwn(req.body || {}, key)) return undefined;
+      const values = req.body[key];
+      if (!Array.isArray(values) || values.some(value => typeof value !== 'string' || value.length > 80)) {
+        throw Object.assign(new Error(`${key} must be an array of skill names of at most 80 characters.`), { status: 400, expose: true });
+      }
+      return values.slice(0, 30);
+    };
+    const confirmed = list('confirmedSkills');
+    const learning = list('learningSkills');
     res.json(withText(await tailorForJob(req.user.id, toNumber(req.params.id), confirmed, learning)));
   }));
 

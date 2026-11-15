@@ -2,41 +2,142 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, download } from './api';
 import ResumeExperience from './ResumeExperience.jsx';
-import { chooseSkill, createResumeRequestGate, gapQuestions, hasPendingSkillChoices, mergeOriginalReport, priorityLabel, reviewKeywords, savedSkillChoices, selectResumeReport } from './resumeReport';
+import { chooseSkill, createResumeRequestGate, gapQuestions, hasPendingSkillChoices, initialSkillChoices, mergeOriginalReport, priorityLabel, reviewKeywords, selectResumeReport } from './resumeReport';
 
-const TARGET = 85;
-const scoreLabel = (s) => (s >= TARGET ? 'Target reached' : s >= 65 ? 'Good alignment' : s >= 45 ? 'Some alignment' : 'Limited alignment');
-const tone = (s) => (s >= TARGET ? 'high' : s >= 45 ? 'mid' : 'low');
 const PARTS = { hardSkills: 'Hard skills', title: 'Job title', softSkills: 'Soft skills', format: 'Document format' };
+const list = (value) => Array.isArray(value) ? value : [];
+const normal = (value) => String(value || '').trim().toLowerCase();
 
-/** How the score is made up: each part's matches and its weight. */
 function Breakdown({ parts }) {
   if (!parts) return null;
-  return (
-    <ul className="breakdown">
-      {Object.entries(PARTS).filter(([k]) => parts[k]?.total).map(([k, label]) => (
-        <li key={k} title={`Worth ${parts[k].weight}% of the score`}>
-          <span>{label}</span>
-          <span className="bar-track"><i style={{ width: `${Math.round((parts[k].matched / parts[k].total) * 100)}%` }} /></span>
-          <b>{parts[k].matched}/{parts[k].total}</b>
-        </li>
-      ))}
-    </ul>
-  );
+  return <ul className="breakdown">{Object.entries(PARTS).filter(([key]) => parts[key]?.total).map(([key, label]) => <li key={key} title={`Worth ${parts[key].weight}% of the score`}>
+    <span>{label}</span><span className="bar-track"><i style={{ width: `${Math.round((parts[key].matched / parts[key].total) * 100)}%` }} /></span><b>{parts[key].matched}/{parts[key].total}</b>
+  </li>)}</ul>;
 }
 
 export function AtsScore({ score, label = 'Estimated alignment' }) {
-  return (
-    <div className={`ats-score m-${tone(score)}`}>
-      <b>{score}%</b>
-      <span>{label}<small>{scoreLabel(score)}</small></span>
-    </div>
-  );
+  return <div className="ats-score"><b>{score}%</b><span>{label}<small>Estimated alignment</small></span></div>;
 }
 
-/** ATS check of the user's resume against one job, plus creating and downloading a tailored version. */
+/** Render the same final fields used by Word export, with plain-text fallback for older saved versions. */
+export function ResumePreview({ tailored }) {
+  const resume = tailored?.resume;
+  if (!resume || typeof resume !== 'object') return <article className="resume-document"><pre className="resume-plain">{tailored?.text}</pre></article>;
+  return <article className="resume-document" aria-label="Tailored resume preview">
+    <header>
+      {resume.name && <h3>{resume.name}</h3>}
+      {resume.headline && <p className="resume-headline">{resume.headline}</p>}
+      {list(resume.contact).length > 0 && <p className="resume-contact">{resume.contact.join(' · ')}</p>}
+    </header>
+    {resume.summary && <section><h4>Professional Summary</h4><p>{resume.summary}</p></section>}
+    {(list(resume.skillGroups).length > 0 || list(resume.skills).length > 0) && <section>
+      <h4>Skills</h4>
+      {list(resume.skillGroups).length > 0
+        ? resume.skillGroups.map((group, index) => <p key={`${group.name}-${index}`}><b>{group.name}:</b> {list(group.items).join(', ')}</p>)
+        : <p>{list(resume.skills).join(', ')}</p>}
+    </section>}
+    {list(resume.sections).map((section, sectionIndex) => <section key={`${section.title}-${sectionIndex}`}>
+      <h4>{section.title}</h4>
+      {list(section.items).map((item, itemIndex) => <div className="resume-role" key={`${item.heading}-${itemIndex}`}>
+        <div className="resume-role-heading"><b>{item.heading}</b>{item.dates && <span>{item.dates}</span>}</div>
+        {item.subheading && <p className="resume-role-subheading">{item.subheading}</p>}
+        {list(item.bullets).length > 0 && <ul>{item.bullets.map((bullet, index) => <li key={index}>{bullet}</li>)}</ul>}
+      </div>)}
+    </section>)}
+  </article>;
+}
+
+function AdditionalDetails({ missingKeywords, disabled, onSaved, onBusyChange }) {
+  const [mounted, setMounted] = useState(false);
+  // Lazy-mount once on first open. Keeping drafts mounted thereafter lets an in-flight save finish safely.
+  return <details className="resume-disclosure" onToggle={(event) => { if (event.currentTarget.open) setMounted(true); }}>
+    <summary>Additional details <span className="muted small">(optional)</span></summary>
+    {mounted && <div className="resume-disclosure-content"><ResumeExperience missingKeywords={missingKeywords} disabled={disabled} onSaved={onSaved} onBusyChange={onBusyChange} /></div>}
+  </details>;
+}
+
+/** The default view keeps tailoring and the finished document together; all review tools are optional. */
+export function ResumeTailorView({ ats, tailored = null, choices = { confirmed: [], learning: [] }, busy = false, refreshing = false, working = false, copied = false, error = '', onTailor, onChoose, onDownload, onCopy, onExperienceSaved, onExperienceBusy }) {
+  const blocked = working || busy || refreshing;
+  const report = selectResumeReport(ats, tailored);
+  const review = reviewKeywords(ats, tailored);
+  const selected = new Set(choices.confirmed.map(normal));
+  const pending = hasPendingSkillChoices(tailored, choices);
+  const evidence = list(tailored?.report?.evidenceMap);
+  const requirements = list(report?.requirements);
+  const questions = gapQuestions(tailored);
+  const afterScore = tailored?.report?.after?.score ?? tailored?.ats_after;
+  if (!ats.hasResume) return <div className="tailor resume-tailor">
+    <div className="banner"><b>Start with your resume.</b> <Link to="/profile">Upload a resume</Link> to create a version for this job.</div>
+    <AdditionalDetails missingKeywords={list(ats.missing)} disabled={blocked} onSaved={onExperienceSaved} onBusyChange={onExperienceBusy} />
+    {error && <div className="error" role="alert">{error}</div>}
+  </div>;
+  return <div className="tailor resume-tailor">
+    <div className="tailor-head">
+      <AtsScore score={ats.score} label="Original" />
+      {tailored && <><span className="arrow" aria-hidden="true">→</span><AtsScore score={afterScore} label="Tailored" /></>}
+    </div>
+    <div className="actions resume-main-actions">
+      <button type="button" className="btn primary" onClick={onTailor} disabled={blocked}>{busy ? 'Tailoring your resume…' : tailored ? 'Re-tailor resume' : 'Tailor my resume'}</button>
+      {tailored && <>
+        <button type="button" className="btn" disabled={blocked} onClick={onDownload}>Download Word</button>
+        <button type="button" className="btn" disabled={blocked} onClick={onCopy}>{copied ? 'Copied' : 'Copy text'}</button>
+      </>}
+    </div>
+    {busy && <p className="muted small" role="status">Creating a resume for this role using your saved experience and selected skills.</p>}
+    {refreshing && <p className="muted small" role="status">Updating your saved details…</p>}
+    {error && <div className="error" role="alert">{error}</div>}
+    {tailored && <section className="resume-preview"><h3>Your tailored resume</h3><ResumePreview tailored={tailored} /></section>}
+
+    {review.length > 0 && <details className="resume-disclosure">
+      <summary>Review skills <span className="muted small">(optional)</span></summary>
+      <div className="resume-disclosure-content form">
+        <p className="muted small">Choose any job skills you have that your resume does not mention yet. Skills already in your profile or saved confirmations are selected for you.</p>
+        <div className="resume-skill-options">{review.map((keyword) => <label className="check" key={keyword}>
+          <input type="checkbox" checked={selected.has(normal(keyword))} disabled={blocked} onChange={() => onChoose?.(keyword, 'confirmed')} />{keyword}
+        </label>)}</div>
+        {choices.learning.length > 0 && <details>
+          <summary className="small">Currently learning</summary>
+          <p className="muted small">These remain separate from the skills you selected above.</p>
+          <div className="resume-skill-options">{choices.learning.map((keyword) => <label className="check" key={keyword}>
+            <input type="checkbox" checked disabled={blocked} onChange={() => onChoose?.(keyword, 'learning')} />{keyword}
+          </label>)}</div>
+        </details>}
+        {pending && <p className="muted small" role="status">Your selections will be used the next time you tailor.</p>}
+        <div className="actions"><button type="button" className="btn" disabled={blocked} onClick={onTailor}>Use selected skills and tailor</button></div>
+      </div>
+    </details>}
+
+    <AdditionalDetails missingKeywords={list(report?.missing)} disabled={blocked} onSaved={onExperienceSaved} onBusyChange={onExperienceBusy} />
+
+    <details className="resume-disclosure resume-analysis">
+      <summary>Analysis details</summary>
+      <div className="resume-disclosure-content form">
+        <p className="muted small">Estimated resume alignment, separate from your profile-to-job match. Target: 85–95% when supported. Employer systems may score differently.</p>
+        <Breakdown parts={report?.breakdown} />
+        <div className="kw"><h5>Keyword coverage in this {tailored?.report?.after ? 'tailored' : 'original'} version</h5><div className="tags">
+          {list(report?.matched).map((keyword) => <span className="tag kw-hit" key={`matched-${keyword}`}>✓ {keyword}</span>)}
+          {list(report?.missing).map((keyword) => <span className="tag kw-miss" key={`missing-${keyword}`} title="Not mentioned in this version">{keyword}</span>)}
+          {list(report?.learningTerms).map((keyword) => <span className="tag learning" key={`learning-${keyword}`}>Learning: {keyword}</span>)}
+        </div></div>
+        {requirements.length > 0 && <div><h5>Job requirements</h5><ul className="changes">{requirements.map((requirement, index) => <li key={requirement.id || index}>
+          <b>{priorityLabel(requirement.priority)}: {list(requirement.terms).join(' or ')}</b>{' · '}{requirement.status === 'matched' ? `Matched: ${list(requirement.matchedTerms).join(', ') || 'related wording'}` : 'Not mentioned in this version'}
+        </li>)}</ul></div>}
+        {list(report?.checks).length > 0 && <div><h5>Formatting checks</h5><ul className="changes">{report.checks.map((check) => <li key={check.label}><b>{check.ok ? '✓ ' : ''}{check.label}</b>{!check.ok && check.tip ? `: ${check.tip}` : ''}</li>)}</ul></div>}
+        {tailored?.changes?.length > 0 && <div><h5>What changed</h5><ul className="changes">{tailored.changes.map((change, index) => <li key={index}>{change}</li>)}</ul></div>}
+        {questions.length > 0 && <div><h5>Optional context for another revision</h5><ul className="changes">{questions.map((question) => <li key={question}>{question}</li>)}</ul><p className="muted small">You can add context under Additional details.</p></div>}
+        {evidence.length > 0 && <details className="ats-checks"><summary>Sources used</summary><ul>{evidence.map((row, index) => <li key={`${row.keyword}-${index}`}>
+          <b>{row.keyword}</b> · {priorityLabel(row.priority)} · {({ demonstrated: 'From your saved experience', confirmed: 'Confirmed skill', learning: 'Currently learning', unsupported: 'Not documented yet' })[row.status] || 'Available for review'}
+          {list(row.sources).map((source, sourceIndex) => <blockquote key={sourceIndex}>{source.quote}</blockquote>)}
+        </li>)}</ul></details>}
+        {tailored?.report?.refinement && <p className="muted small">Refinement passes: {tailored.report.refinement.attempts}/{tailored.report.refinement.maxAttempts || 2}. {tailored.report.refinement.reason}</p>}
+        {tailored && !tailored.ai && <p className="muted small">Built-in tailoring was used for this version.</p>}
+      </div>
+    </details>
+  </div>;
+}
+
 export default function ResumeTailor({ jobId }) {
-  // A different job receives fresh state immediately, before any asynchronous loading effects run.
   return <ResumeTailorJob key={jobId} jobId={jobId} />;
 }
 
@@ -54,197 +155,52 @@ function ResumeTailorJob({ jobId }) {
 
   useEffect(() => {
     const request = requestGate.begin(jobId);
-    api(`/jobs/${jobId}/ats`).then((d) => {
+    api(`/jobs/${jobId}/ats`).then((data) => {
       if (!requestGate.accepts(request)) return;
-      setAts(d);
-      setTailored(d.tailored || null);
-      setChoices(savedSkillChoices(d.tailored));
-    }).catch((e) => {
-      if (!requestGate.accepts(request)) return;
-      setError(e.message);
-    });
-    return () => {
-      requestGate.invalidate();
-      clearTimeout(copyTimer.current);
-    };
+      setAts(data); setTailored(data.tailored || null); setChoices(initialSkillChoices(data, data.tailored));
+    }).catch((failure) => { if (requestGate.accepts(request)) setError(failure.message); });
+    return () => { requestGate.invalidate(); clearTimeout(copyTimer.current); };
   }, [jobId, requestGate]);
 
   const experienceSaved = async () => {
+    if (!requestGate.current) return;
     const request = requestGate.begin(jobId);
-    setTailored(null);
-    setCopied(false);
-    setBusy(false);
-    setExperienceBusy(false);
-    setRefreshing(true);
-    setError('');
+    setTailored(null); setCopied(false); setBusy(false); setExperienceBusy(false); setRefreshing(true); setError('');
     try {
       const current = await api(`/jobs/${jobId}/ats`);
-      if (requestGate.accepts(request)) setAts(current);
+      if (requestGate.accepts(request)) { setAts(current); setChoices(initialSkillChoices(current, null)); }
     } catch (failure) {
-      if (requestGate.accepts(request)) setError(`Your experience is saved, but this assessment could not refresh. Reopen this job to try again. ${failure.message}`);
-    } finally {
-      if (requestGate.accepts(request)) setRefreshing(false);
-    }
+      if (requestGate.accepts(request)) setError(`Your details are saved. Reopen this job to refresh its assessment. ${failure.message}`);
+    } finally { if (requestGate.accepts(request)) setRefreshing(false); }
   };
-  const working = busy || refreshing || experienceBusy;
-
-  if (error && !ats) return <div className="error">{error}</div>;
-  if (!ats) return <p className="muted small">Checking your resume against this job…</p>;
-  if (!ats.hasResume) {
-    return (
-      <div className="tailor">
-        <div className="banner"><b>See how your resume scores for this job.</b> <Link to="/profile">Upload your resume</Link> on the Profile page first (PDF or Word).</div>
-        <ResumeExperience missingKeywords={ats.missing || []} disabled={busy || refreshing} onSaved={experienceSaved} onBusyChange={setExperienceBusy} />
-        {error && <div className="error">{error}</div>}
-      </div>
-    );
-  }
-
-  const report = selectResumeReport(ats, tailored);
-  const { confirmed, learning } = choices;
-  const review = reviewKeywords(ats, tailored);
-  const evidence = tailored?.report?.evidenceMap || [];
-  const requirements = report.requirements || [];
-  const pending = hasPendingSkillChoices(tailored, choices);
-  const questions = gapQuestions(tailored);
-  const tailoredScore = tailored?.report?.after?.score ?? tailored?.ats_after;
-  const choose = (keyword, kind) => setChoices((current) => chooseSkill(current, keyword, kind));
   const tailor = async () => {
     const request = requestGate.begin(jobId);
     setBusy(true); setError('');
     try {
-      const result = await api(`/jobs/${jobId}/tailor`, { method: 'POST', body: { confirmedSkills: confirmed, learningSkills: learning } });
+      const result = await api(`/jobs/${jobId}/tailor`, { method: 'POST', body: { confirmedSkills: choices.confirmed, learningSkills: choices.learning } });
       if (requestGate.accepts(request)) {
-        setAts((current) => mergeOriginalReport(current, result));
-        setTailored(result);
-        setChoices(savedSkillChoices(result));
-        setCopied(false);
+        const original = mergeOriginalReport(ats, result);
+        setAts(original); setTailored(result); setChoices(initialSkillChoices(original, result)); setCopied(false);
       }
-    } catch (e) {
-      if (requestGate.accepts(request)) setError(e.message);
-    } finally {
-      if (requestGate.accepts(request)) setBusy(false);
-    }
+    } catch (failure) { if (requestGate.accepts(request)) setError(failure.message); }
+    finally { if (requestGate.accepts(request)) setBusy(false); }
   };
   const copy = async () => {
     const request = requestGate.current;
     try {
       await navigator.clipboard.writeText(tailored.text);
       if (!requestGate.accepts(request)) return;
-      setCopied(true);
-      clearTimeout(copyTimer.current);
+      setCopied(true); clearTimeout(copyTimer.current);
       copyTimer.current = setTimeout(() => { if (requestGate.accepts(request)) setCopied(false); }, 2000);
-    } catch (e) { if (requestGate.accepts(request)) setError(e.message); }
+    } catch (failure) { if (requestGate.accepts(request)) setError(failure.message); }
   };
   const downloadResume = async () => {
     const request = requestGate.current;
     try { await download(`/jobs/${jobId}/tailor/docx`, 'resume.docx'); }
-    catch (e) { if (requestGate.accepts(request)) setError(e.message); }
+    catch (failure) { if (requestGate.accepts(request)) setError(failure.message); }
   };
-  const failing = (report.checks || []).filter((c) => !c.ok);
-
-  return (
-    <div className="tailor">
-      <div className="tailor-head">
-        <AtsScore score={ats.score} label="Original resume" />
-        {tailored && <><span className="arrow" aria-hidden>→</span><AtsScore score={tailoredScore} label="Tailored resume" /></>}
-        <span className="muted small target">Target: {TARGET}–95% when supported</span>
-      </div>
-      <p className="muted small">
-        Estimated resume alignment with this job, separate from your profile-to-job match. A higher score does not guarantee an employer's ATS result or an interview. Include only skills you can support.
-      </p>
-      <Breakdown parts={report.breakdown} />
-
-      <div className="kw">
-        <h5>Keyword coverage in your {tailored ? 'tailored' : 'original'} resume</h5>
-        <div className="tags">
-          {(report.matched || []).map((k) => <span key={`matched-${k}`} className="tag kw-hit" title="Found in the latest assessed version">✓ {k}</span>)}
-          {(report.missing || []).map((k) => <span key={`missing-${k}`} className="tag kw-miss" title="Not demonstrated in the latest assessed version">{k}</span>)}
-          {(report.learningTerms || []).map((k) => <span key={`learning-${k}`} className="tag learning" title="Learning does not establish proficiency">Learning: {k}</span>)}
-        </div>
-        {requirements.length > 0 && <details className="ats-checks">
-          <summary>Required, preferred, and alternative requirements</summary>
-          <ul>{requirements.map((requirement, index) => <li key={requirement.id || index}>
-            <b>{priorityLabel(requirement.priority)}: {(requirement.terms || []).join(' or ')}</b>
-            {' — '}{requirement.status === 'matched' ? `Found: ${(requirement.matchedTerms || []).join(', ') || 'supported wording'}` : 'Not demonstrated yet'}
-          </li>)}</ul>
-        </details>}
-      </div>
-
-      <ResumeExperience missingKeywords={report.missing || []} disabled={busy || refreshing} onSaved={experienceSaved} onBusyChange={setExperienceBusy} />
-      {refreshing && <p className="muted small" role="status">Updating this job's assessment with your saved experience…</p>}
-
-      {review.length > 0 && <div className="kw">
-        <h5>Confirm your experience, one skill at a time</h5>
-        <p className="muted small">
-          Choose <b>I have it</b> only for skills you can substantiate. Choose <b>Learning</b> only for active study; it appears as professional development and does not count as demonstrated proficiency.
-        </p>
-        <div className="tags">{review.map((keyword) => {
-          const row = evidence.find((item) => item.keyword?.toLowerCase() === keyword.toLowerCase());
-          return <span key={keyword} className={`tag kw-miss ${confirmed.includes(keyword) ? 'on' : ''} ${learning.includes(keyword) ? 'learning' : ''}`} title={row?.question}>
-            {keyword}{row?.priority && <small> · {priorityLabel(row.priority)}</small>}
-            <button type="button" disabled={working} className={confirmed.includes(keyword) ? 'on' : ''} onClick={() => choose(keyword, 'confirmed')} aria-pressed={confirmed.includes(keyword)}>I have it</button>
-            <button type="button" disabled={working} className={learning.includes(keyword) ? 'on' : ''} onClick={() => choose(keyword, 'learning')} aria-pressed={learning.includes(keyword)}>Learning</button>
-          </span>;
-        })}</div>
-        {pending && <div className="banner small" role="status">
-          Your selections are pending. {tailored ? 'Re-tailor to update this saved version and its assessment.' : 'Tailor your resume to apply these selections.'} Keyword tags and formatting checks continue to describe the currently assessed version.
-        </div>}
-      </div>}
-
-      {failing.length > 0 && (
-        <details className="ats-checks">
-          <summary>{failing.length} formatting {failing.length === 1 ? 'issue' : 'issues'} in the {tailored ? 'tailored' : 'original'} version</summary>
-          <ul>{failing.map((c) => <li key={c.label}><b>{c.label}:</b> {c.tip}</li>)}</ul>
-        </details>
-      )}
-
-      <div className="actions">
-        <button type="button" className="btn primary" onClick={tailor} disabled={working}>
-          {busy ? 'Tailoring and checking evidence…' : tailored ? '↻ Re-tailor resume' : '✨ Tailor my resume for this job'}
-        </button>
-        {tailored && <button type="button" className="btn" disabled={working} onClick={downloadResume}>⬇ Download Word (.docx)</button>}
-        {tailored && <button type="button" className="btn" disabled={working} onClick={copy}>{copied ? 'Copied ✓' : 'Copy as text'}</button>}
-      </div>
-      {error && <div className="error">{error}</div>}
-
-      {tailored && (
-        <>
-          {!tailored.ai && tailored.report?.aiNote && <div className="banner small"><b>Built-in tailoring used.</b> An AI revision was unavailable or did not improve the supported result. Review the evidence and preview below.</div>}
-          {tailored.report?.gap && (
-            <div className={`banner small ${tailored.report.gap.weakFit ? 'error-banner' : ''}`}>
-              <b>Remaining gaps at {tailoredScore}% estimated alignment.</b> {tailored.report.gap.message}
-              {tailored.report.gap.missing?.length > 0 && <> Missing: {tailored.report.gap.missing.join(', ')}.</>}
-            </div>
-          )}
-          {tailoredScore >= TARGET && <div className="banner ok small">✓ The current estimate meets the {TARGET}% target. Review every claim before applying.</div>}
-          {questions.length > 0 && <div className="banner small">
-            <b>Details that could address the remaining gaps</b>
-            <ul>{questions.map((question) => <li key={question}>{question}</li>)}</ul>
-            Add truthful examples to your <Link to="/profile">Profile</Link>, then re-tailor. Leave unsupported skills unselected.
-          </div>}
-          {evidence.length > 0 && <details className="ats-checks">
-            <summary>Evidence and confirmations used for this version</summary>
-            <ul>{evidence.map((row, index) => <li key={`${row.keyword}-${index}`}>
-              <b>{row.keyword}</b> · {priorityLabel(row.priority)} · {({ demonstrated: 'Supported by your resume or profile', confirmed: 'Confirmed by you', learning: 'Learning only; no proficiency credit', unsupported: 'No supporting evidence yet' })[row.status] || 'Awaiting review'}
-              {row.terms?.length > 1 && <p className="muted small">Alternatives: {row.terms.join(' or ')}</p>}
-              {row.sources?.map((source, sourceIndex) => <blockquote key={sourceIndex}>{source.quote} <small className="muted">({source.source})</small></blockquote>)}
-            </li>)}</ul>
-          </details>}
-          {tailored.report?.refinement && <p className="muted small">
-            Refinement passes: {tailored.report.refinement.attempts} of {tailored.report.refinement.maxAttempts || 2}. {tailored.report.refinement.reason}
-          </p>}
-          <ul className="changes">{(tailored.changes || []).map((c) => <li key={c}>{c}</li>)}</ul>
-          <p className="muted small">
-            {tailored.ai ? 'AI-assisted tailoring uses your resume, profile, and individual confirmations, with evidence checks and bounded refinement.' : 'Tailored with built-in rules using your resume, profile, and individual confirmations.'}
-            {' '}Learning stays separate from experience. Standard sections and a simple layout improve readability; a higher estimate cannot replace missing qualifications. Review the preview and evidence before sending this version.
-          </p>
-          <details className="preview">
-            <summary>Preview tailored resume</summary>
-            <pre className="letter">{tailored.text}</pre>
-          </details>
-        </>
-      )}
-    </div>
-  );
+  if (error && !ats) return <div className="error">{error}</div>;
+  if (!ats) return <p className="muted small">Loading your resume…</p>;
+  return <ResumeTailorView ats={ats} tailored={tailored} choices={choices} busy={busy} refreshing={refreshing} working={busy || refreshing || experienceBusy} copied={copied} error={error}
+    onTailor={tailor} onChoose={(keyword, kind) => setChoices((current) => chooseSkill(current, keyword, kind))} onDownload={downloadResume} onCopy={copy} onExperienceSaved={experienceSaved} onExperienceBusy={setExperienceBusy} />;
 }

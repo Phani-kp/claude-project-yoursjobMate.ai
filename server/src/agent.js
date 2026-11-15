@@ -1,7 +1,8 @@
 import { db, csv } from './db.js';
 import { ensureJobDetails, matchScore, rankedJobsFor, syncJobs } from './jobs.js';
 import { AI_MODEL, aiClient, generateCoverLetter } from './ai.js';
-import { tailorResume } from './resume.js';
+import { getResumeInputFingerprint, RESUME_SCORING_VERSION, tailorResume } from './resume.js';
+import { normalizeExperienceEntries } from './resumeExperience.js';
 
 let io = null;
 export const setIo = (server) => { io = server; };
@@ -13,7 +14,7 @@ export async function getProfile(userId) {
   const row = await db.get('SELECT * FROM profiles WHERE user_id = ?', userId);
   if (!row) return row;
   const { resume_data: _file, ...profile } = row;
-  return profile;
+  return { ...profile, resume_evidence: normalizeExperienceEntries(profile.resume_evidence) };
 }
 export const getApplication = (id, userId) => db.get('SELECT * FROM applications WHERE id = ? AND user_id = ?', id, userId);
 
@@ -33,22 +34,81 @@ export async function updateApplication(id, userId, fields) {
 
 const parseTailored = (row) => row && { ...row, ai: !!row.ai, resume: JSON.parse(row.resume), changes: JSON.parse(row.changes), report: JSON.parse(row.report) };
 
-export const getTailoredResume = async (userId, jobId) =>
-  parseTailored(await db.get('SELECT * FROM tailored_resumes WHERE user_id = ? AND job_id = ?', userId, jobId));
+/** Reuse earlier user selections without reusing a stale generated document. */
+export async function getSavedResumeChoices(userId, jobId) {
+  const row = await db.get('SELECT report FROM tailored_resumes WHERE user_id = ? AND job_id = ?', userId, jobId);
+  const clean = values => Array.isArray(values) ? [...new Set(values
+    .filter(value => typeof value === 'string' && value.trim() && value.length <= 80)
+    .map(value => value.trim().toLowerCase()))].slice(0, 30) : [];
+  try {
+    const report = JSON.parse(row?.report || '{}');
+    const choices = report.skillChoices && typeof report.skillChoices === 'object' && !Array.isArray(report.skillChoices)
+      ? report.skillChoices : {
+        confirmed: (Array.isArray(report.evidenceMap) ? report.evidenceMap : []).filter(value => value?.status === 'confirmed'
+          && Array.isArray(value.sources) && value.sources.some(source => source?.source === 'user-confirmation')).map(value => value.keyword),
+        learning: (Array.isArray(report.evidenceMap) ? report.evidenceMap : []).filter(value => value?.status === 'learning').map(value => value.keyword),
+      };
+    const confirmed = clean(choices.confirmed);
+    return { confirmed, learning: clean(choices.learning).filter(value => !confirmed.includes(value)) };
+  } catch { return { confirmed: [], learning: [] }; }
+}
+
+/** Reports without current input/version metadata remain stored but must be regenerated before use. */
+export function isTailoredReportCurrent(report, inputs) {
+  try {
+    const parsed = typeof report === 'string' ? JSON.parse(report) : report;
+    return !!inputs?.profile && !!inputs?.user && !!inputs?.job
+      && parsed?.scoringVersion === RESUME_SCORING_VERSION
+      && parsed.inputFingerprint === getResumeInputFingerprint(inputs);
+  } catch { return false; }
+}
+
+export async function getTailoredResume(userId, jobId, inputs) {
+  const row = await db.get('SELECT * FROM tailored_resumes WHERE user_id = ? AND job_id = ?', userId, jobId);
+  if (!row) return null;
+  if (!inputs) {
+    const [profile, user, job] = await Promise.all([
+      getProfile(userId),
+      db.get('SELECT id, name, email FROM users WHERE id = ?', userId),
+      db.get('SELECT * FROM jobs WHERE id = ?', jobId),
+    ]);
+    inputs = { resumeText: profile?.resume_text, profile, user, job };
+  }
+  return isTailoredReportCurrent(row.report, inputs) ? parseTailored(row) : null;
+}
 
 /**
  * Creates (or replaces) the user's ATS-tailored resume for a job and saves it.
  * confirmedSkills: missing job keywords the user has confirmed they really have.
  * learningSkills: missing job keywords the user is actively learning (listed under Professional Development).
  */
-export async function tailorForJob(userId, jobId, confirmedSkills = [], learningSkills = []) {
+export async function tailorForJob(userId, jobId, confirmedSkills, learningSkills) {
   await ensureJobDetails(jobId);
   const job = await db.get('SELECT * FROM jobs WHERE id = ?', jobId);
   if (!job) throw Object.assign(new Error('Job not found'), { status: 404, expose: true });
   const user = await db.get('SELECT id, name, email FROM users WHERE id = ?', userId);
   const profile = await getProfile(userId);
+  if (confirmedSkills === undefined || learningSkills === undefined) {
+    const saved = await getSavedResumeChoices(userId, jobId);
+    if (confirmedSkills === undefined) confirmedSkills = saved.confirmed;
+    if (learningSkills === undefined) learningSkills = saved.learning;
+  }
   const t = await tailorResume({ resumeText: profile.resume_text, profile, user, job, aiClient, model: AI_MODEL, confirmedSkills, learningSkills });
-  const report = { before: t.before, after: t.after, gap: t.gap, removed: t.removed, inferred: t.inferred, aiNote: t.aiNote };
+  const report = {
+    before: t.before, after: t.after, gap: t.gap, removed: t.removed, inferred: t.inferred, aiNote: t.aiNote,
+    evidenceMap: t.evidenceMap, refinement: t.refinement,
+    inputFingerprint: t.inputFingerprint, scoringVersion: t.scoringVersion, skillChoices: t.skillChoices,
+  };
+  const [latestProfile, latestUser, latestJob] = await Promise.all([
+    getProfile(userId),
+    db.get('SELECT id, name, email FROM users WHERE id = ?', userId),
+    db.get('SELECT * FROM jobs WHERE id = ?', jobId),
+  ]);
+  if (!latestProfile || !latestUser || !latestJob || getResumeInputFingerprint({
+    resumeText: latestProfile.resume_text, profile: latestProfile, user: latestUser, job: latestJob,
+  }) !== t.inputFingerprint) {
+    throw Object.assign(new Error('Your resume or this job changed while tailoring. Reload and try again.'), { status: 409, expose: true });
+  }
   const { rows: [row] } = await db.run(`INSERT INTO tailored_resumes (user_id, job_id, resume, changes, ats_before, ats_after, report, ai)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (user_id, job_id) DO UPDATE SET resume = EXCLUDED.resume, changes = EXCLUDED.changes, ats_before = EXCLUDED.ats_before,
