@@ -2,8 +2,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDevSupervisor } from './devSupervisor.js';
 import { createSourceWatcher } from './sourceWatcher.js';
+import { assertDevelopmentDatabaseAvailable } from './devPreflight.js';
 
 const serverRoot = fileURLToPath(new URL('../', import.meta.url));
+try {
+  assertDevelopmentDatabaseAvailable({ serverRoot });
+} catch (error) {
+  console.error(`[dev] Could not start the API: ${error.message}`);
+  process.exit(1);
+}
 let supervisor;
 let stopping = false;
 let exitCode = 0;

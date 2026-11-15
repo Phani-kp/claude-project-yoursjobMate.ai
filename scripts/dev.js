@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { fork } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { manageChild } from '../server/scripts/devSupervisor.js';
+import { assertDevelopmentDatabaseAvailable } from '../server/scripts/devPreflight.js';
 import { createDevProxy } from '../client/devProxy.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -65,6 +66,9 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) process.on(sig
 process.on('message', (message) => { if (message?.type === 'shutdown') stop(); });
 if (process.connected) process.send({ type: 'ready' }, () => {});
 try {
+  // Report an existing API before starting another watcher or frontend.
+  // The database still takes its own exclusive lock to protect against races.
+  assertDevelopmentDatabaseAvailable({ serverRoot: path.join(root, 'server') });
   vite = await createServer({ root: clientRoot, plugins: [gateway.plugin], server: { proxy: gateway.proxy } });
   if (!stopping) {
     api = manageChild(fork(path.join(root, 'server/scripts/dev.js'), [], {

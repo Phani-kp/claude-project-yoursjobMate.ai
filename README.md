@@ -71,6 +71,8 @@ Without `DATABASE_URL`, data is saved in an embedded Postgres in `server/data/pg
 
 Run one API process per PGlite directory. The server takes an exclusive directory lock and reports an existing owner instead of opening the same database twice. `npm run dev` waits for database shutdown before restarting its API child, including on Windows. Stop it with Ctrl+C and wait for shutdown before starting another API or a script that opens the same database. Changing the API port does not give it a different database.
 
+If another development session already owns the database, `npm run dev` reports its process ID before starting another API or frontend. Keep using the frontend URL in the original terminal, or press Ctrl+C in that terminal, wait for shutdown to finish, and run `npm run dev` once. Do not delete the database or its lock to bypass a running owner. The final `API exited before it began listening` line summarizes a startup failure; the preceding error identifies its cause. The Node.js version printed after a stack trace does not by itself identify the cause.
+
 The development watcher compares file contents before restarting. Metadata-only filesystem notifications and unchanged files do not interrupt the API; source and configuration edits restart it after the saved contents settle.
 
 The default directory is resolved relative to `server/`, whether you start from the repository root or `server/`. Optional `DB_PATH` selects another PGlite directory; relative paths are also resolved from `server/`. Pointing at another directory does not migrate existing accounts.
@@ -97,6 +99,22 @@ If PGlite cannot start, the server includes PostgreSQL's startup error (such as 
 4. Select recovered storage only after validation and a clean close/reopen check. Retain the original, backups, diagnostic copies and recovery receipts under ignored `server/data/`; those artifacts can contain account data and must stay out of Git.
 
 Exclusive locking and graceful shutdown prevent overlapping processes from opening the same directory; they do not repair existing checkpoint damage. Recovery work is separate from normal app startup.
+
+## Resume alignment and tailoring
+
+The resume percentage is this app's **estimated alignment**, calculated from the final resume text. It is separate from the profile/job match percentage and does not predict an employer's ATS score or hiring decision. The 85–95% target is an aspiration when sufficient experience supports the role; genuine gaps can keep a result below it, and a supported score above 95 is retained.
+
+The existing category weights remain hard skills 55%, title 15%, soft skills 10%, and format checks 20%; categories without requirements redistribute their weight. Explicit alternatives such as “Python or C#” count as one requirement met by either skill. Required, preferred, and unspecified requirements are labeled separately; the score measures coverage of the extracted groups. Background and benefits text are excluded. Changed job text or tags invalidate the keyword cache, including same-length edits.
+
+Before rewriting, the server maps each requirement to resume evidence, self-attested profile/confirmed skills, current learning, or an unsupported gap. Confirmed skills can enter Skills without inventing their use at a past employer. Learning is shown separately and excluded from proficiency coverage. Original employers, historical titles, dates, qualifications, tools, and metrics are retained; questionable rewrites fall back to their source bullets. Missing facts produce focused questions rather than fabricated achievements.
+
+Open a job and click **Tailor my resume**. The writer automatically uses your upload, profile skills, previously confirmed skills for that job, and relevant saved experience. Profile and confirmed skills can appear in the Summary and categorized Skills without requiring an additional experience form. Professional paraphrases are checked against source responsibilities, tools, identities, and numeric outcomes rather than requiring every output word to exist in the original. The main result shows the original and tailored alignment, a resume preview, and download/re-tailor actions. Keyword and evidence diagnostics are collapsed.
+
+**Review skills** is an optional compact selection panel; known profile skills and saved confirmations are prefilled. There is no required project title, organization, date, or explanation step before tailoring. To add context that an upload leaves out, open the collapsed **Additional details** section. Select project, work/internship, or coursework; enter a title, skills used, and rough notes. Organization, dates, and numeric measurements remain optional. The app stores up to 20 examples on your own Postgres profile and selects up to six relevant examples for each job. These facts can support rewritten bullets in Projects, Experience, or Coursework. An existing role can receive additional details when its title and organization match. Your original upload and saved examples remain intact.
+
+With `ANTHROPIC_API_KEY` set only in the server environment, tailoring makes at most two AI requests: an initial rewrite and one additional revision when recoverable supported gaps remain below target. Each request has a 45-second timeout, no automatic SDK retries, and an 8,000-token output limit. The server validates and scores each candidate and retains the best supported result, including the rules-based candidate. Tests mock AI requests and use isolated databases.
+
+Scores, keyword indicators, and formatting checks for a tailored resume use its final report. Saved resumes are bound to the current source resume, relevant profile/account fields, job contents, and scoring version. Editing these inputs makes an older version unavailable for download until **Re-tailor resume** regenerates it; its database row remains intact. Older saved reports also require regeneration after this scoring update.
 
 ## Accounts and email
 
