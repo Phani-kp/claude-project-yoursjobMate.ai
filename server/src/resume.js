@@ -6,9 +6,9 @@ import { createHash } from 'node:crypto';
 import { buildEvidenceMap, preserveResumeFacts, quoteSupportsSkill, summarySentenceSupported } from './resumeEvidence.js';
 import { normalizeExperienceEntries } from './resumeExperience.js';
 import { addExperienceSource } from './resumeExperienceSource.js';
-import { addWritingSkills, includeSummarySkills } from './resumeWriting.js';
+import { addToOwnSkillGroups, addWritingSkills, includeSummarySkills } from './resumeWriting.js';
 
-export const RESUME_SCORING_VERSION = '2026-11-writer-v4';
+export const RESUME_SCORING_VERSION = '2026-11-writer-v9';
 export function getResumeInputFingerprint({ resumeText, profile = {}, user = {}, job = {} }) {
   const fields = (object, keys) => keys.map((key) => object[key] ?? '');
   return createHash('sha256').update(JSON.stringify([
@@ -47,7 +47,7 @@ export async function extractResumeText(buffer, filename, mimetype = '') {
 }
 
 // Pure requirement extraction/scoring is shared by matching and evidence checks.
-import { HARD_SKILLS, ALL_TERMS, ALIASES, textHas, escapeRe, sectionOf, titleWords, jobKeywords, atsReport, TARGET_SCORE, proficiencyText } from './resumeAnalysis.js';
+import { HARD_SKILLS, ALL_TERMS, ALIASES, textHas, hasTerm, escapeRe, sectionOf, titleWords, jobKeywords, atsReport, TARGET_SCORE, proficiencyText } from './resumeAnalysis.js';
 export { HARD_SKILLS, ALL_TERMS, ALIASES, SOFT, textHas, directHas, hasTerm, escapeRe, sectionOf, titleWords, jobKeywords, atsReport, TARGET_SCORE, proficiencyText, requirementsText } from './resumeAnalysis.js';
 
 // ---------------------------------------------------------------------------
@@ -116,10 +116,19 @@ const ROLE_WORDS = /\b(engineer|developer|analyst|scientist|manager|architect|co
  */
 function joinWrappedLines(lines) {
   const out = [];
-  for (const line of lines) {
+  const headerish = (l) => l && l.length <= 80 && !BULLET.test(l) && !sectionOf(l) && !/^[a-z(]/.test(l) && !/[.!?;,]$/.test(l);
+  // "Data Analyst" / "Calder Financial, Dallas, TX" / "Jun 2020 - Feb 2022": a job title followed within two lines
+  // by its dates starts a new role, even when the bullet above it has no full stop.
+  const startsRole = (n) => headerish(lines[n]) && !DATES.test(lines[n])
+    && (DATES.test(lines[n + 1] || '') && headerish(lines[n + 1]) && ROLE_WORDS.test(lines[n])
+      || headerish(lines[n + 1]) && DATES.test(lines[n + 2] || '') && headerish(lines[n + 2]) && (ROLE_WORDS.test(lines[n]) || ROLE_WORDS.test(lines[n + 1])));
+  const openEnd = /[,;:&/\-–(]$|\b(and|or|with|of|for|to|the|in|across|including)$/i;
+  for (const [n, line] of lines.entries()) {
     const prev = out.at(-1);
-    const startsNew = BULLET.test(line) || sectionOf(line) || DATES.test(line) || /^[^|]{2,60}\|[^|]{2,80}$/.test(line) && ROLE_WORDS.test(line) && !/[.,;]$/.test(prev || '');
-    const prevOpen = prev && !sectionOf(prev) && (/[,;:&/\-–(]$|\b(and|or|with|of|for|to|the|in|across|including)$/i.test(prev) || (BULLET.test(prev) && !/[.!?]$/.test(prev)));
+    // A line that opens with an email, link or phone number is a contact line, never the rest of the line above.
+    const startsNew = BULLET.test(line) || sectionOf(line) || DATES.test(line) || /^(\S+@\S+\.\S+|https?:|www\.|linkedin\.com|github\.com|\+?\(?\d[\d\s().-]{8,}\d)/i.test(line) || /^[^|]{2,60}\|[^|]{2,80}$/.test(line) && ROLE_WORDS.test(line) && !/[.,;]$/.test(prev || '')
+      || !openEnd.test(prev || '') && (startsRole(n) || n > 0 && startsRole(n - 1) && !DATES.test(line));
+    const prevOpen = prev && !sectionOf(prev) && (openEnd.test(prev) || (BULLET.test(prev) && !/[.!?]$/.test(prev)));
     if (prev && !startsNew && (prevOpen || /^[a-z(]/.test(line))) out[out.length - 1] = `${prev} ${line}`;
     else out.push(line);
   }
@@ -153,26 +162,42 @@ export function parseResume(text, profile = {}, user = {}) {
   // The name as written on the resume, else the account name.
   resume.name ||= user.name || '';
   resume.headline ||= profile.headline || '';
-  for (const c of [user.email, profile.phone, profile.linkedin]) if (c && !resume.contact.some((x) => x.includes(c))) resume.contact.push(c);
+  // The resume's own contact details win. Account details only fill in a kind the resume doesn't have, so a
+  // resume with its own email never gets the login email added as a second one.
+  const has = { email: (x) => /@/.test(x), phone: (x) => !/@|https?:|www\.|linkedin|github/i.test(x) && /\+?\d[\d\s().-]{8,}\d/.test(x), linkedin: (x) => /linkedin/i.test(x) };
+  for (const [kind, c] of [['email', user.email], ['phone', profile.phone], ['linkedin', profile.linkedin]]) if (c && !resume.contact.some(has[kind])) resume.contact.push(c);
 
+  // The candidate's own layout is recorded next to the parsed facts, so a tailored version can be written back in
+  // the same shape: `labels` and `label` are headings as written, `order` is the section order, `lines` are a
+  // role's header lines as written, and a skill group's `text` is its line as written.
+  resume.labels = {};
+  // "AWS (S3, Redshift, Glue)" becomes AWS, S3, Redshift, Glue: split outside brackets first, then unpack the list.
+  // "HDF5; NoSQL: Cassandra" lists Cassandra, not "NoSQL: Cassandra".
+  const skillItems = (text) => text.split(/\s*[,|•·;]\s*(?![^()]*\))/)
+    .flatMap((s) => { const list = s.match(/^(.+?)\s*\(([^()]*,[^()]*)\)$/); return list ? [list[1], ...list[2].split(/\s*,\s*/)] : [s]; })
+    .map((s) => s.replace(/^[A-Za-z][A-Za-z /&-]{1,24}:\s*/, '').replace(/\.$/, '').trim()).filter((s) => s && s.length < 50);
+  let flatSkills = '';
   let current = null;
   for (; i < lines.length; i++) {
     const line = lines[i];
     const kind = sectionOf(line);
     if (kind) {
-      current = kind === 'summary' || kind === 'skills' ? { kind } : { kind, section: { title: TITLES[kind], items: [] } };
+      current = kind === 'summary' || kind === 'skills' ? { kind } : { kind, section: { title: TITLES[kind], label: line, order: resume.sections.length, items: [] } };
       if (current.section) resume.sections.push(current.section);
+      else resume.labels[kind] ||= line;
       continue;
     }
     if (!current) continue;
     if (current.kind === 'summary') resume.summary = `${resume.summary} ${line}`.trim();
     else if (current.kind === 'skills') {
       // "Batch Processing and Big Data: Apache Spark, PySpark, Scala" keeps its category.
-      const m = line.replace(BULLET, '').match(/^([^:]{2,45}):\s*(.+)$/);
-      const items = (m ? m[2] : line.replace(BULLET, '')).split(/\s*[,|•·;]\s*/).map((s) => s.replace(/\.$/, '').trim()).filter((s) => s && s.length < 50);
-      resume.skills.push(...items);
-      if (m) resume.skillGroups.push({ name: m[1].trim(), items });
-      else if (resume.skillGroups.length) resume.skillGroups.at(-1).items.push(...items);
+      const text = line.replace(BULLET, '');
+      const m = text.match(/^([^:,;]{2,45}):\s*(.+)$/);
+      const group = resume.skillGroups.at(-1);
+      if (m) resume.skillGroups.push({ name: m[1].trim(), text: m[2].trim(), items: skillItems(m[2]) });
+      // A line with no category continues the category above it ("…Synapse, Key" / "Vault, Entra ID").
+      else if (group) { group.text = `${group.text} ${text}`.trim(); group.items = skillItems(group.text); }
+      else flatSkills = `${flatSkills}${flatSkills && !/[,;|•·]$/.test(flatSkills) ? ', ' : ' '}${text}`.trim();
     } else {
       const items = current.section.items;
       const last = items.at(-1);
@@ -182,29 +207,44 @@ export function parseResume(text, profile = {}, user = {}) {
         last.dates = line.match(DATES)[0];
         const place = line.replace(DATES, '').replace(/^[\s|,–-]+|[\s|,–-]+$/g, '');
         if (place) last.subheading = [last.subheading, place].filter(Boolean).join(', ');
+        last.lines.push(line);
       } else if (last && !last.subheading && !last.bullets.length && line.length < 80 && !ROLE_WORDS.test(line)) {
         // "Pixel Labs | June 2019 to Dec 2020" under a title line.
         const dates = line.match(DATES)?.[0] || '';
         last.subheading = line.replace(dates, '').replace(/^[\s|,–-]+|[\s|,–-]+$/g, '');
         last.dates ||= dates;
+        last.lines.push(line);
       } else if (line.length > 110 && last) last.bullets.push(line);
-      else items.push(roleHeader(line));
+      else items.push({ ...roleHeader(line), lines: [line] });
     }
   }
+  resume.skills = resume.skillGroups.length ? resume.skillGroups.flatMap((g) => g.items) : skillItems(flatSkills);
   if (!resume.skills.length) resume.skills = csv(profile.skills);
   return resume;
+}
+
+/** A skill category as one line: the candidate's own wording first, then anything added that it doesn't already say. */
+export function skillGroupText(group) {
+  const items = group.items || [];
+  if (!group.text) return items.join(', ');
+  const written = group.text.replace(/[.\s]+$/, '');
+  const lower = written.toLowerCase();
+  const added = items.filter((item) => !lower.includes(String(item).toLowerCase()));
+  return [written, ...added].join(', ');
 }
 
 /** Plain-text rendering, used for re-scoring and "copy as text". */
 export function resumeToText(r) {
   const out = [r.name, r.headline, r.contact.join(' | '), ''];
-  if (r.summary) out.push('PROFESSIONAL SUMMARY', r.summary, '');
-  if (r.skillGroups?.length) out.push('TECHNICAL SKILLS', ...r.skillGroups.map((g) => `${g.name}: ${g.items.join(', ')}`), '');
-  else if (r.skills.length) out.push('TECHNICAL SKILLS', r.skills.join(', '), '');
+  if (r.summary) out.push(r.labels?.summary || 'PROFESSIONAL SUMMARY', r.summary, '');
+  if (r.skillGroups?.length) out.push(r.labels?.skills || 'TECHNICAL SKILLS', ...r.skillGroups.map((g) => `${g.name}: ${skillGroupText(g)}`), '');
+  else if (r.skills.length) out.push(r.labels?.skills || 'TECHNICAL SKILLS', r.skills.join(', '), '');
   for (const s of r.sections) {
-    out.push(s.title === 'Experience' ? 'PROFESSIONAL EXPERIENCE' : s.title.toUpperCase());
+    out.push(s.label || (s.title === 'Experience' ? 'PROFESSIONAL EXPERIENCE' : s.title.toUpperCase()));
     for (const it of s.items) {
-      out.push([it.heading, it.subheading, it.dates].filter(Boolean).join(' | '));
+      // The role's own header lines when the resume supplied them, else the standard one-line header.
+      if (it.lines?.length) out.push(...it.lines);
+      else out.push([it.heading, it.subheading, it.dates].filter(Boolean).join(' | '));
       for (const b of it.bullets) out.push(`• ${b}`);
     }
     out.push('');
@@ -219,7 +259,7 @@ export function resumeToText(r) {
 // How common terms are normally written, for skills that aren't already spelled out in the user's resume.
 const CASING = { javascript: 'JavaScript', typescript: 'TypeScript', 'node.js': 'Node.js', 'next.js': 'Next.js', graphql: 'GraphQL', 'rest api': 'REST APIs', restful: 'RESTful',
   postgresql: 'PostgreSQL', mysql: 'MySQL', mongodb: 'MongoDB', aws: 'AWS', gcp: 'Google Cloud (GCP)', 'ci/cd': 'CI/CD', html: 'HTML', css: 'CSS', sql: 'SQL', 'ui/ux': 'UI/UX',
-  nlp: 'NLP', llm: 'LLMs', tdd: 'TDD', etl: 'ETL', 'a/b testing': 'A/B testing', 'power bi': 'Power BI', 'github actions': 'GitHub Actions', saas: 'SaaS', b2b: 'B2B',
+  nlp: 'NLP', llm: 'LLMs', tdd: 'TDD', etl: 'ETL', elt: 'ELT', 'aws glue': 'AWS Glue', 'aws emr': 'AWS EMR', 'aws lambda': 'AWS Lambda', 'etl pipelines': 'ETL pipelines', 'a/b testing': 'A/B testing', 'power bi': 'Power BI', 'github actions': 'GitHub Actions', saas: 'SaaS', b2b: 'B2B',
   sre: 'SRE', seo: 'SEO', oauth: 'OAuth', '.net': '.NET', 'asp.net': 'ASP.NET', 'c#': 'C#', 'c++': 'C++', php: 'PHP', iam: 'IAM', siem: 'SIEM', erp: 'ERP', sap: 'SAP',
   crm: 'CRM', 'fp&a': 'FP&A', gaap: 'GAAP', aml: 'AML', kyc: 'KYC', pmp: 'PMP', hris: 'HRIS', ehr: 'EHR', hipaa: 'HIPAA', fda: 'FDA', pcr: 'PCR', cpr: 'CPR', bls: 'BLS',
   'gd&t': 'GD&T', fea: 'FEA', cfd: 'CFD', fmea: 'FMEA', spc: 'SPC', plc: 'PLC', scada: 'SCADA', fpga: 'FPGA', 'pcb design': 'PCB design', rf: 'RF', cad: 'CAD', cam: 'CAM', cnc: 'CNC',
@@ -282,16 +322,21 @@ export function standardise(r) {
     return true;
   };
   const clean = (s) => String(s).trim().replace(/\.$/, '');
+  // "AWS (S3, Redshift, Glue)" is listed as AWS, S3, Redshift, Glue, so each skill appears once and parsers can read it.
+  const unpack = (s) => { const list = String(s).match(/^(.+?)\s*\(([^()]*,[^()]*)\)\.?$/); return list ? [list[1], ...list[2].split(/\s*,\s*/)] : [s]; };
   // Categorised skills ("Cloud Platforms: AWS, Azure") stay categorised; each skill appears once across all groups.
   const skillGroups = (r.skillGroups || [])
-    .map((g) => ({ name: clean(g.name).replace(/:$/, ''), items: (g.items || []).map(clean).filter(keep) }))
+    .map((g) => ({ name: clean(g.name).replace(/:$/, ''), ...(g.text && { text: String(g.text).trim() }), items: (g.items || []).flatMap(unpack).map(clean).filter(keep) }))
     .filter((g) => g.name && g.items.length).slice(0, 8);
-  const skills = skillGroups.length ? skillGroups.flatMap((g) => g.items) : (r.skills || []).map(clean).filter(keep).slice(0, 30);
+  const skills = skillGroups.length ? skillGroups.flatMap((g) => g.items) : (r.skills || []).flatMap(unpack).map(clean).filter(keep).slice(0, 30);
   const sections = (r.sections || [])
     .map((s) => ({
       title: STANDARD_TITLE(s.title || ''),
+      // The candidate's own heading text and position, when the resume supplied them.
+      ...(s.label && { label: String(s.label).trim() }), ...(Number.isInteger(s.order) && { order: s.order }),
       items: (s.items || []).map((it) => ({
         heading: String(it.heading || '').trim(), subheading: String(it.subheading || '').trim(), dates: normaliseDates(it.dates),
+        ...(Array.isArray(it.lines) && it.lines.length && { lines: it.lines.map((line) => String(line).trim()).filter(Boolean) }),
         bullets: (it.bullets || []).map((b) => String(b).replace(/^[•\-–*▪●◦·]\s*/, '').trim()).filter(Boolean),
       })).filter((it) => it.heading || it.bullets.length),
     }))
@@ -300,8 +345,11 @@ export function standardise(r) {
   const merged = [];
   for (const s of sections) { const m = merged.find((x) => x.title === s.title); if (m) m.items.push(...s.items); else merged.push(s); }
   const rank = (t) => { const i = SECTION_ORDER.indexOf(t); return i < 0 ? SECTION_ORDER.length : i; };
-  merged.sort((a, b) => rank(a.title) - rank(b.title));
+  // Sections keep the order the candidate used; ones the resume didn't have follow in the standard order.
+  const placed = (s) => (Number.isInteger(s.order) ? s.order : 100 + rank(s.title));
+  merged.sort((a, b) => placed(a) - placed(b));
   return {
+    ...(r.labels && Object.keys(r.labels).length && { labels: { ...r.labels } }),
     name: String(r.name || '').trim(), headline: String(r.headline || '').trim(),
     contact: [...new Map((r.contact || []).map((raw) => {
       const value = String(raw).trim();
@@ -324,7 +372,7 @@ const evidencedSkills = (evidence) => ALL_TERMS.filter((t) => textHas(evidence, 
  * Removes anything the evidence doesn't support: skills, summary sentences, headline and bullets that claim a known
  * skill the candidate never mentioned. Returns the list of removed claims.
  */
-function enforceEvidence(r, evidence, originalText) {
+function enforceEvidence(r, evidence, originalText, targetRole = "") {
   const unsupported = (text, proof = evidence) => ALL_TERMS.filter((t) => textHas(text, t) && !textHas(proof, t));
   const removed = new Set();
   const supportedSkill = (s) => {
@@ -343,7 +391,7 @@ function enforceEvidence(r, evidence, originalText) {
     const bad = unsupported(s, evidence);
     bad.forEach((b) => removed.add(b));
     const credentials = s.match(/\b(certified|certifications?|degrees?|phd|mba|doctorate|licensed)\b/gi) || [];
-    return !bad.length && summarySentenceSupported(s, originalText, r.headline, evidence)
+    return !bad.length && summarySentenceSupported(s, originalText, [r.headline, targetRole].filter(Boolean).join(" "), evidence)
       && credentials.every((claim) => new RegExp(`\\b${claim}\\b`, 'i').test(originalText));
   }).join(' ');
   if (unsupported(r.headline).length) { unsupported(r.headline).forEach((b) => removed.add(b)); r.headline = ''; }
@@ -409,6 +457,32 @@ const FAMILY_WORK = {
  *   that appear only in experience bullets are surfaced; the job's exact wording is used for matching skills;
  * - experience: the bullets that mention what the job screens for come first in every role.
  */
+/**
+ * A headline for this job in the candidate's own format. "DATA ENGINEER | SPARK • AWS • API INTEGRATION" becomes
+ * "DATA ENGINEER | DATA MODELING • ETL • SQL • SPARK": same separators, same capitals, same number of keywords.
+ * Only supported keywords are used; a plain headline simply becomes the role.
+ */
+export function tailoredHeadline(own, role, supportedKeywords) {
+  // A bar, or a dash with spaces around it: "Full-Stack Developer" is one role, not a role and a keyword.
+  const shape = String(own || '').match(/^(.+?)(\s*\|\s*|\s+[–—-]\s+)(.+)$/);
+  const separator = shape?.[3].match(/\s*[•·,/|]\s*/)?.[0];
+  if (!shape || !role) return role || own || '';
+  const ownKeywords = separator ? shape[3].split(separator).map((s) => s.trim()).filter(Boolean) : [shape[3].trim()];
+  const key = (s) => ALIASES[s.toLowerCase()] || s.toLowerCase();
+  // The role itself ("data engineering" for a Data Engineer) is not repeated as a keyword.
+  const roleKeys = new Set([key(role), ...ALL_TERMS.filter((term) => hasTerm(role, term))]);
+  const seen = new Set();
+  const keywords = [...supportedKeywords.map(pretty), ...ownKeywords].filter((keyword) => {
+    const k = key(keyword);
+    if (roleKeys.has(k) || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }).slice(0, Math.max(ownKeywords.length, 3));
+  const upper = shape[1] === shape[1].toUpperCase();
+  const cased = (s) => (upper ? s.toUpperCase() : s);
+  return `${cased(role)}${shape[2]}${keywords.map(cased).join(separator || ' • ')}`;
+}
+
 function tailorWithoutAI({ resumeText, profile, user, job, evidence, confirmed }) {
   const base = parseResume(resumeText, profile, user);
   const detected = detectResumeProfile(resumeText, profile);
@@ -446,31 +520,21 @@ function tailorWithoutAI({ resumeText, profile, user, job, evidence, confirmed }
   base.headline = role;
   const lead = relevantHard.slice(0, 4).map(pretty);
   const intro = `${role}${lead.length ? ` with skills in ${lead.join(', ')}` : ''}.`;
-  const own = base.summary.split(/(?<=[.!?])\s+/);
-  // The candidate's own "X with N years of experience…" opener is replaced by the tailored one; the rest is kept.
-  const rest = (/\b\d+\+?\s*years?\b/i.test(own[0] || '') ? own.slice(1) : own).join(' ');
-  const softLine = relevantSoft.length && !relevantSoft.every((s) => textHas(rest, s)) ? ` Strengths include ${relevantSoft.slice(0, 3).join(', ')}.` : '';
-  base.summary = `${intro} ${rest}${softLine}`.trim();
+  // The candidate's own summary is kept word for word; a generated opener is used only when the resume has none.
+  const ownSummary = base.summary.trim();
+  const softLine = relevantSoft.length && !relevantSoft.every((s) => textHas(ownSummary, s)) ? ` Strengths include ${relevantSoft.slice(0, 3).join(', ')}.` : '';
+  base.summary = `${ownSummary || intro}${softLine}`.trim();
 
-  // Experience and projects: put the evidence most relevant to this job first.
-  for (const s of base.sections) {
-    for (const it of s.items) it.bullets.sort((a, b) => relevance(b) - relevance(a));
-    if (s.title === 'Projects') {
-      s.items.sort((a, b) => {
-        const score = (it) => it.bullets.reduce((n, bullet) => n + relevance(bullet), 0);
-        return score(b) - score(a);
-      });
-    }
-  }
-
+  // Roles, projects and bullets stay in the order the candidate wrote them.
+  const ownHeadline = parseResume(resumeText, {}, {}).headline;
   const changes = [
-    fits ? `Headline set to the target role with your strongest matching skills: "${base.headline}".` : `Kept your own role in the headline: your past titles don't match "${cleanJobTitle(job)}" closely enough to claim it.`,
-    `Summary opens with a ${detected.label ? detected.label.toLowerCase() : 'role'}-specific line naming ${lead.length ? `the skills this job screens for that you have (${lead.join(', ')})` : 'your experience'}; the rest of your own summary is kept.`,
-    base.skillGroups.length ? 'Kept your skill categories, with the most relevant category and the matching skills first.' : 'Matching skills listed first in your Skills section.',
+    'Kept your section headings, role lines and the order of your roles and bullets.',
+    /[|•·]/.test(ownHeadline) ? 'Rewrote your headline for this job in your own format: the role, then the skills this job screens for that you have.'
+      : fits ? `Headline set to the target role: "${base.headline}".` : `Kept your own role in the headline: your past titles don't match "${cleanJobTitle(job)}" closely enough to claim it.`,
+    ownSummary ? 'Kept your summary as you wrote it, and added the skills this job screens for that it did not mention.' : 'Wrote a short summary from your role and matching skills.',
+    base.skillGroups.length ? 'Kept your skill categories and wording; matching skills the job names were added to the category they belong in.' : 'Matching skills listed first in your Skills section.',
     ...(surfaced.length ? [`Surfaced skills you already show in your experience, in the job's wording: ${surfaced.map(pretty).join(', ')}.`] : []),
     ...(confirmed.length ? [`Added skills you confirmed you have: ${confirmed.map(pretty).join(', ')}.`] : []),
-    'In Experience and Projects, the entries and bullets that match this job now come first.',
-    'Standard ATS format: Summary, Skills, Experience, Projects, Education, Certifications; one column; one date style; no tables or graphics.',
   ];
   return { resume: base, changes };
 }
@@ -571,23 +635,59 @@ export async function tailorResume({ resumeText, profile, user, job, aiClient, m
   const learning = selectedLearning.filter((term) => evidenceMap.some((row) => row.keyword === term && row.status === 'learning'));
   const evidence = [original, cleanProfile.skills, cleanProfile.headline, cleanProfile.titles, confirmed.join(', ')].filter(Boolean).join('\n');
   const baseline = tailorWithoutAI({ resumeText: original, profile: cleanProfile, user, job, evidence, confirmed });
-  source.headline = baseline.resume.headline;
+  // The headline is rewritten for each job, in the shape the candidate used. baseline.resume.headline is the target
+  // role when their past titles fit it, else their own role. "ROLE | A • B • C" keeps that shape: the role, then the
+  // job's keywords the evidence supports (required ones first), topped up with the candidate's own.
+  source.headline = tailoredHeadline(source.headline, baseline.resume.headline,
+    jobKeywords(job).hard.filter((keyword) => textHas(evidence, keyword)));
+  // Skill categories exactly as the candidate wrote them, when the resume has categories.
+  const ownGroups = source.skillGroups.some((group) => group.text) ? source.skillGroups : null;
   const evaluate = (raw, ai = false) => {
     const inferred = verifiedInferences(raw.inferredSkills, keywords, original);
     const facts = preserveResumeFacts(standardise(raw.resume), source, additional.scopes);
     const resume = facts.resume;
-    const removed = enforceEvidence(resume, evidence, original);
+    const removed = enforceEvidence(resume, evidence, original, baseline.resume.headline);
+    // The candidate's own wording stays unless a rewrite earns its place: a reworded bullet or summary sentence is
+    // kept only when it adds a job keyword the original line did not literally contain.
+    const addsKeyword = (next, prior) => keywords.some((keyword) => hasTerm(next, keyword) && !hasTerm(prior, keyword));
+    for (const section of resume.sections) {
+      const ownSection = source.sections.find((candidate) => candidate.title === section.title);
+      for (const [n, item] of section.items.entries()) {
+        const ownItem = ownSection?.items[n];
+        if (!ownItem || ownItem.bullets.length !== item.bullets.length) continue;
+        item.bullets = item.bullets.map((bullet, k) => (addsKeyword(bullet, ownItem.bullets[k]) ? bullet : ownItem.bullets[k]));
+      }
+    }
+    if (source.summary) {
+      // Every sentence of the candidate's summary is kept, in order. A validated rewrite of a sentence replaces it
+      // only when it adds a job keyword; sentences the candidate never wrote are not added.
+      const sentences = (text) => String(text).split(/(?<=[.!?])\s+/).filter(Boolean);
+      const words = (text) => new Set(text.toLowerCase().match(/[a-z0-9+#]{3,}/g) || []);
+      const pool = sentences(resume.summary);
+      const used = new Set();
+      resume.summary = sentences(source.summary).map((own) => {
+        const ownWords = words(own);
+        let best = -1, bestScore = 0;
+        pool.forEach((candidate, index) => {
+          if (used.has(index)) return;
+          const candidateWords = words(candidate);
+          const score = [...candidateWords].filter((word) => ownWords.has(word)).length / Math.max(ownWords.size, candidateWords.size, 1);
+          if (score > bestScore) { bestScore = score; best = index; }
+        });
+        if (best < 0 || bestScore < 0.5 || !addsKeyword(pool[best], own)) return own;
+        used.add(best);
+        return pool[best];
+      }).join(' ');
+    }
     // Keep every supported original skill and explicitly confirmed skill visible,
     // without assigning profile-only skills to a previous employer.
     const skills = [...baseline.resume.skills, ...before.matched.map(pretty), ...confirmed.map(pretty), ...inferred.map((i) => pretty(i.keyword))];
-    addWritingSkills(resume, skills);
+    // Only job keywords the evidence supports are added; the candidate's own categories and wording are kept.
+    if (ownGroups) addToOwnSkillGroups(resume, ownGroups, [...before.matched.map(pretty), ...confirmed.map(pretty), ...inferred.map((i) => pretty(i.keyword))], original);
+    else addWritingSkills(resume, skills);
+    if (source.labels) resume.labels = source.labels;
     includeSummarySkills(resume, evidenceMap.filter((row) => ['demonstrated', 'confirmed'].includes(row.status)).map((row) => row.keyword), pretty);
-    const relevance = (text) => keywords.filter((keyword) => textHas(text, keyword)).length;
-    for (const section of resume.sections) {
-      if (!['Experience', 'Projects'].includes(section.title)) continue;
-      for (const item of section.items) item.bullets.sort((a, b) => relevance(b) - relevance(a));
-      if (section.title === 'Projects') section.items.sort((a, b) => relevance(b.bullets.join(' ')) - relevance(a.bullets.join(' ')));
-    }
+    // Roles, projects and bullets stay in the order the candidate wrote them.
     resume.sections = resume.sections.filter((section) => section.title !== 'Professional Development');
     if (learning.length) resume.sections.push({ title: 'Professional Development', items: [{ heading: 'Currently learning', subheading: '', dates: '', bullets: [learning.map(pretty).join(', ')] }] });
     resume.keywords = [...new Set([...before.matched, ...confirmed, ...inferred.map((i) => i.keyword)])];
@@ -612,7 +712,7 @@ export async function tailorResume({ resumeText, profile, user, job, aiClient, m
     for (let attempt = 0; attempt < 2; attempt++) {
       attempts++;
       try {
-        const raw = await tailorWithAI({ resumeText: original, profile: cleanProfile, user, job, evidence, evidenceMap, confirmed, aiClient, model, previous });
+        const raw = await tailorWithAI({ resumeText: original, profile: cleanProfile, user, job, evidence, evidenceMap, confirmed, aiClient, model, previous, source });
         if (!raw) { aiNote = 'The AI did not return a usable revision. The best supported version was retained.'; break; }
         const candidate = evaluate(raw, true);
         if (candidate.after.score > best.after.score || (!attempt && candidate.after.score === best.after.score)) best = candidate;
@@ -679,7 +779,7 @@ function keywordEvidence(resumeText, keywords) {
   }).join('\n');
 }
 
-async function tailorWithAI({ resumeText, profile, user, job, evidence, evidenceMap, confirmed, aiClient, model, previous }) {
+async function tailorWithAI({ resumeText, profile, user, job, evidence, evidenceMap, confirmed, aiClient, model, previous, source }) {
   const { betaJSONSchemaOutputFormat } = await import('@anthropic-ai/sdk/helpers/beta/json-schema');
   const schema = {
     type: 'object',
@@ -704,6 +804,10 @@ async function tailorWithAI({ resumeText, profile, user, job, evidence, evidence
   const { hard, soft } = jobKeywords(job);
   const have = new Set(evidencedSkills(evidence));
   const supported = [...hard, ...soft].filter((k) => have.has(k));
+  const bulletGuide = (source?.sections || []).filter((section) => ['Experience', 'Projects'].includes(section.title))
+    .flatMap((section) => section.items.flatMap((item) => item.bullets.map((bullet) =>
+      `- [${item.heading}${item.subheading ? `, ${item.subheading}` : ''}] "${bullet.slice(0, 300)}" -> ${[...hard, ...soft].filter((k) => textHas(bullet, k)).join(', ') || '(no job keywords; improve wording only)'}`)))
+    .join(String.fromCharCode(10)).slice(0, 12000);
   const unsupported = [...hard, ...soft].filter((k) => !have.has(k));
   const response = await aiClient.beta.messages.parse({
     model,
@@ -722,17 +826,23 @@ What to do:
 - Profile and explicit skill confirmations are trusted user input. Include relevant ones in categorized Skills and a natural capability statement in the professional summary, even if the uploaded document omits them. They do not by themselves prove use at a specific employer or project.
 - Use contextual saved experience already included in CURRENT RESUME without asking the user to re-enter it. A rewritten bullet must retain its supplied tools and metrics and use only facts associated with that source role/project.
 - Look hard for skills on the NOT-YET-SHOWN list that the resume demonstrates in different words (e.g. "extracted, transformed and loaded data" is ETL; "built dashboards in Tableau for execs" is data visualization). For each, add it to "inferredSkills" with a verbatim quote copied exactly from the resume, and you may then use it in the resume. Quotes are checked word for word; a skill without a real quote is removed.
-- headline: the target job title if the candidate's past titles fit it; otherwise their own current title.
-- summary: 2–4 sentences: role, years of experience, the 3–5 most relevant skills for this job, and one concrete achievement from the resume.
-- skills: group logically into skillGroups (for example Languages, Data and Databases, Cloud, Delivery and Testing). Keep appropriate existing categories; most relevant category first, supported job keywords first within each. A cohesive resume matters more than repeating a keyword.
-- Order: within each role, the bullets that match this job first. Projects: the most relevant first.
+- Keep the candidate's own resume recognisable. This is their document with targeted edits, not a new resume: same headline, same sections, same skill categories, same roles, and the same bullets in the same order.
+- headline: the candidate's own headline exactly as written. Only if the resume has none, the target job title when their past titles fit it.
+- summary: start from the candidate's own summary and keep its sentences, facts and length. Change only the wording needed to work in SUPPORTED keywords in the job's vocabulary. If the resume has no summary, write 2–4 sentences from its facts.
+- skills: keep the candidate's skill categories, their names, their order and the skills in them. Add a missing SUPPORTED keyword to the existing category it belongs in. Do not create, rename, merge or reorder categories.
+- Order: keep roles, projects and bullets in the candidate's order. Return one bullet for each original bullet.
 - Format: sections titled exactly "Experience", "Projects", "Education", "Certifications"; each item has heading (job title / degree / project), subheading (company or school, city), dates ("Jan 2021 – Present"). Keep every role, employer, date, degree and certification from the original.
 
 Truthfulness (overrides everything above):
 - Never invent or inflate employers, titles, dates, degrees, certifications, numbers, team sizes, responsibilities or tools.
 - Do not move numbers or achievements from one role/project to another. Preserve all original roles and facts. If a formatting check needs missing factual information, leave a gap rather than fabricating it.
 - Preferred skills are optional; one member of an explicit OR group satisfies that group. Learning is separate from proficiency.
-- A NOT-YET-SHOWN keyword may appear only if you list it in inferredSkills with a real quote. Otherwise leave it out, and name it in "changes" as a gap.`,
+- A NOT-YET-SHOWN keyword may appear only if you list it in inferredSkills with a real quote. Otherwise leave it out, and name it in "changes" as a gap.
+
+How your rewrite is checked (a bullet or summary sentence that fails is discarded and the candidate's original wording is used instead, so a failed rewrite gains nothing):
+- Each rewritten bullet is compared with its own original bullet in BULLET GUIDE. It may use only the job keywords listed for that bullet, must keep every tool, number and result of the original, and must keep the same kind of action (built stays built, maintained stays maintained, scheduled may become orchestrated).
+- Reword with the job's vocabulary and close synonyms. Do not add new nouns, outcomes, purposes, scope, adjectives of scale, or tools that the original bullet does not state. Keep one rewritten bullet per original bullet, in the same role.
+- Summary sentences may only combine facts, numbers and wording that appear in the resume, plus SUPPORTED keywords. Keep the candidate's own numbers attached to the achievement they belong to.`,
     messages: [{
       role: 'user',
       content: `TARGET JOB: ${job.title} at ${job.company}${job.location ? ` (${job.location})` : ''}
@@ -744,6 +854,9 @@ EVIDENCE MAP (demonstrated means resume evidence; confirmed means a self-atteste
 ${JSON.stringify(evidenceMap.map((row) => ({ ...row, sources: row.sources.map((source) => ({ ...source, quote: source.quote.slice(0, 600) })) })))}
 
 ${previous ? `ONE FINAL REVISION: the validated first revision scored ${previous.score}%. Improve only these supported gaps: ${previous.supportedMissing.join(', ') || '(none)'}. Recover factual formatting: ${previous.checks.join(', ') || '(none)'}. Retain every verified fact and use the source resume as authority. Previous candidate:\n${JSON.stringify(previous.resume).slice(0, 40000)}` : 'INITIAL REVISION: produce a complete, factual resume.'}
+
+BULLET GUIDE (each original bullet, then the only job keywords a rewrite of it may use):
+${bulletGuide || '(no bullets found)'}
 
 NOT-YET-SHOWN keywords (the job screens for these; use one only with a verbatim quote in inferredSkills): ${unsupported.join(', ') || '(none)'}
 
@@ -785,21 +898,33 @@ export async function resumeToDocx(r) {
   ];
   if (r.headline) children.push(new Paragraph({ alignment: AlignmentType.CENTER, children: keywordRuns(r.headline, { size: 24, font: FONT }) }));
   if (r.contact.length) children.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 120 }, children: [new TextRun({ text: r.contact.join('  |  '), size: 20, font: FONT })] }));
-  if (r.summary) children.push(heading('Professional Summary'), para(r.summary));
+  // Headings, skill lines and role lines use the candidate's own wording and layout when the resume supplied them.
+  if (r.summary) children.push(heading(r.labels?.summary || 'Professional Summary'), para(r.summary));
   if (r.skillGroups?.length) {
     // "Big Data & Processing: Spark, PySpark, Databricks": plain paragraphs with a bold label, which every ATS reads.
-    children.push(heading('Technical Skills'), ...r.skillGroups.map((g) => new Paragraph({ spacing: { after: 40 }, children: [
-      new TextRun({ text: `${g.name}: `, bold: true, size: 21, font: FONT }), ...keywordRuns(g.items.join(', '), { size: 21, font: FONT }),
+    children.push(heading(r.labels?.skills || 'Technical Skills'), ...r.skillGroups.map((g) => new Paragraph({ spacing: { after: 40 }, children: [
+      new TextRun({ text: `${g.name}: `, bold: true, size: 21, font: FONT }), ...keywordRuns(skillGroupText(g), { size: 21, font: FONT }),
     ] })));
-  } else if (r.skills.length) children.push(heading('Technical Skills'), para(r.skills.join(', ')));
+  } else if (r.skills.length) children.push(heading(r.labels?.skills || 'Technical Skills'), para(r.skills.join(', ')));
   for (const s of r.sections) {
     if (!s.items.length) continue;
-    children.push(heading(s.title === 'Experience' ? 'Professional Experience' : s.title));
+    children.push(heading(s.label || (s.title === 'Experience' ? 'Professional Experience' : s.title)));
     for (const it of s.items) {
-      const runs = keywordRuns(it.heading, { bold: true, size: 22, font: FONT });
-      if (it.subheading) runs.push(new TextRun({ text: `, ${it.subheading}`, size: 22, font: FONT }));
-      if (it.dates) runs.push(new TextRun({ text: `  ${it.dates}`, size: 20, font: FONT, italics: true }));
-      children.push(new Paragraph({ spacing: { before: 120, after: 40 }, children: runs }));
+      if (it.lines?.length) {
+        // "CVS Health | Sr. Data Engineer" then "November 2025 – Present | Remote, USA", both bold as on the original.
+        // An entry without bullets ("Master's in X | University") is bold up to the first separator.
+        it.lines.forEach((line, n) => {
+          const cut = it.bullets.length ? -1 : line.search(/\s[|–—-]\s/);
+          const runs = cut < 0 ? [new TextRun({ text: line, bold: true, size: 22, font: FONT })]
+            : [new TextRun({ text: line.slice(0, cut), bold: true, size: 22, font: FONT }), new TextRun({ text: line.slice(cut), size: 22, font: FONT })];
+          children.push(new Paragraph({ spacing: { before: n ? 0 : 120, after: n === it.lines.length - 1 ? 40 : 0 }, children: runs }));
+        });
+      } else {
+        const runs = keywordRuns(it.heading, { bold: true, size: 22, font: FONT });
+        if (it.subheading) runs.push(new TextRun({ text: `, ${it.subheading}`, size: 22, font: FONT }));
+        if (it.dates) runs.push(new TextRun({ text: `  ${it.dates}`, size: 20, font: FONT, italics: true }));
+        children.push(new Paragraph({ spacing: { before: 120, after: 40 }, children: runs }));
+      }
       for (const b of it.bullets) children.push(para(b, { numbering: { reference: 'bullets', level: 0 } }));
     }
   }

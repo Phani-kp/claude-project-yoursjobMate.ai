@@ -130,7 +130,7 @@ test('cache identity includes same-length edits, tags and title contents', () =>
 test('format checks, words and the existing score weights remain available', () => {
   const text = 'Sam\nsam@example.com\n555-555-0123\nSummary\nEngineer\nSkills\nSQL, communication\nExperience\nImproved 20% and served 500 users.\nEducation\nDegree';
   const report = atsReport(text, job('Required: SQL and communication.', { title: 'Engineer' }));
-  assert.deepEqual(Object.fromEntries(Object.entries(report.breakdown).map(([key, value]) => [key, value.weight])), { hardSkills: 55, title: 15, softSkills: 10, format: 20 });
+  assert.deepEqual(Object.fromEntries(Object.entries(report.breakdown).map(([key, value]) => [key, value.weight])), { hardSkills: 55, title: 15, softSkills: 3, format: 20 }); // one soft skill carries a third of the soft-skill weight
   assert.equal(report.checks.length, 8);
   assert.equal(report.words, text.split(/\s+/).length);
   assert.ok(report.score >= 0 && report.score <= 100);

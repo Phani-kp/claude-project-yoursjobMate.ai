@@ -39,14 +39,15 @@ function fakeAI(revisions) {
 }
 const draft = (text = resumeText) => ({ resume: standardise(parseResume(text, {}, user)), changes: ['Rewrote supported content'], inferredSkills: [] });
 
-test('a supported candidate reaches the target with an actual rewritten bullet and unchanged source identities', async () => {
+test('a supported candidate reaches the target; a synonym-only rewrite does not replace their wording, and source identities are unchanged', async () => {
   const revision = draft();
   revision.resume.sections[0].items[0].bullets[0] = 'Delivered React interfaces with TypeScript for 3 teams and cut load time by 30%';
   const ai = fakeAI([revision]);
   const result = await tailorResume({ resumeText, user, profile: {}, job, aiClient: ai, model: 'fixture' });
   assert.ok(result.after.score >= 85);
   assert.equal(result.ai, true);
-  assert.match(result.resume.sections[0].items[0].bullets[0], /^Delivered/);
+  // "Delivered" for "Built" adds no job keyword, so the candidate's own bullet stays.
+  assert.match(result.resume.sections[0].items[0].bullets[0], /^Built React interfaces/);
   assert.equal(result.resume.sections[0].items[0].subheading, 'Acme');
   assert.equal(result.resume.sections[0].items[0].dates, 'Jan 2021 – Present');
   assert.equal(result.refinement.attempts, 1);
@@ -95,7 +96,7 @@ test('confirmed skills belong in Skills without fabricated employer use, identit
   assert.deepEqual(result.inferred, []);
 });
 
-test('bounded refinement supplies measured feedback and retains the best validated candidate when a revision worsens', async () => {
+test("a revision that guts the summary cannot worsen the result: the candidate's own summary is kept and no second request is needed", async () => {
   const longSummary = 'Frontend engineer creates maintainable web interfaces with React and TypeScript for product teams. '.repeat(24);
   const text = resumeText.replace('Frontend engineer building web interfaces with React and TypeScript.', longSummary);
   const demanding = { ...job, description: 'Required: React, TypeScript, AWS, Python, Kubernetes and PyTorch.' };
@@ -106,11 +107,11 @@ test('bounded refinement supplies measured feedback and retains the best validat
   const ai = fakeAI([first, second]);
   const baseline = await tailorResume({ resumeText: text, user, profile: {}, job: demanding });
   const result = await tailorResume({ resumeText: text, user, profile: {}, job: demanding, aiClient: ai, model: 'fixture' });
-  assert.equal(ai.calls.length, 2);
-  assert.equal(result.refinement.attempts, 2);
+  assert.equal(ai.calls.length, 1);
+  assert.equal(result.refinement.attempts, 1);
   assert.ok(result.after.score >= baseline.after.score);
-  assert.match(ai.calls[1].body.messages[0].content, /ONE FINAL REVISION/);
-  assert.match(ai.calls[1].body.messages[0].content, /Good length/);
+  assert.equal(result.resume.summary.split('Frontend engineer creates maintainable web interfaces').length - 1, 24, 'every sentence of the own summary is kept');
+  assert.match(ai.calls[0].body.messages[0].content, /INITIAL REVISION/);
   for (const { body, options } of ai.calls) {
     assert.equal(body.max_tokens, 8000);
     assert.equal(options.maxRetries, 0);
@@ -197,10 +198,10 @@ test('summary rewrites retain original metrics and cannot reassign a known numbe
   assert.doesNotMatch(result.resume.summary, /infrastructure costs/);
 });
 
-test('source facts remain intact while the most relevant accomplishments move first', async () => {
+test('source facts remain intact and bullets stay in the order the candidate wrote them', async () => {
   const text = resumeText.replace('• Built React', '• Maintained Java APIs\n• Built React');
   const result = await tailorResume({ resumeText: text, user, profile: {}, job });
   const bullets = result.resume.sections.find((section) => section.title === 'Experience').items[0].bullets;
-  assert.match(bullets[0], /React/);
-  assert.ok(bullets.includes('Maintained Java APIs'));
+  assert.equal(bullets[0], 'Maintained Java APIs');
+  assert.match(bullets[1], /React/);
 });

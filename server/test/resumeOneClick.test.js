@@ -116,10 +116,11 @@ test('profile skills and explicit confirmations enter Skills and Summary without
   assert.deepEqual(result.report.skillChoices.confirmed, ['docker']);
 });
 
-test('professional summary paraphrases survive factual validation', async () => {
+test("the candidate's own summary wording is kept when a paraphrase adds no job keyword", async () => {
   const f = await fixture('SQL, Python, Airflow');
   const result = await tailor(f);
-  assert.match(result.resume.summary, /developing accessible web applications/);
+  assert.match(result.resume.summary, /building accessible web interfaces with React and JavaScript for internal teams/);
+  assert.doesNotMatch(result.resume.summary, /developing accessible web applications/);
 });
 
 test('preview, saved report, and Word output share the actual score', async () => {

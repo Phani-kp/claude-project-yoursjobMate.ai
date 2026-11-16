@@ -49,6 +49,7 @@ export const ALIASES = {
   'presenting': 'presentation', 'presentations': 'presentation', 'user experience': 'ui/ux', 'ux': 'ui/ux', 'fp and a': 'fp&a',
   'financial planning and analysis': 'fp&a', 'project manager': 'project management', 'product manager': 'product management', 'epic systems': 'epic', 'electronic health records': 'ehr',
   // Data engineering wording
+  'data engineer': 'data engineering', 'data engineers': 'data engineering', 'data flow': 'data pipelines', 'data flows': 'data pipelines',
   'apache spark': 'spark', 'apache airflow': 'airflow', 'apache kafka': 'kafka', 'apache flink': 'flink', 'apache hive': 'hive', 'apache iceberg': 'iceberg', 'mwaa': 'airflow',
   'star schemas': 'star schema', 'snowflake schema': 'dimensional modeling', 'data model': 'data modeling', 'data models': 'data modeling', 'data modelling': 'data modeling',
   'data warehouse': 'data warehousing', 'data warehouses': 'data warehousing', 'enterprise data warehouse': 'data warehousing', 'edw': 'data warehousing',
@@ -61,7 +62,7 @@ export const ALIASES = {
 // Dimensional / star-schema design is data modeling, and these imply their broader skill too.
 const IMPLIES = {
   'star schema': ['data modeling', 'dimensional modeling'], 'dimensional modeling': ['data modeling'], pyspark: ['spark', 'python'], 'spark sql': ['spark', 'sql'],
-  'azure data factory': ['azure'], 'azure synapse': ['azure', 'data warehousing'], 'azure databricks': ['databricks', 'azure'], 'aws glue': ['aws'], 'aws emr': ['aws'],
+  'azure data factory': ['azure'], 'azure synapse': ['azure', 'data warehousing'], 'azure databricks': ['databricks', 'azure'], 'aws glue': ['aws', 'etl'], 'aws emr': ['aws'],
   'aws lambda': ['aws', 'serverless'], 'amazon s3': ['aws'], redshift: ['aws', 'data warehousing'], snowflake: ['data warehousing'], 'delta lake': ['data lake', 'lakehouse'],
   't-sql': ['sql'], 'pl/sql': ['sql'], 'sql server': ['sql'], postgresql: ['sql'], mysql: ['sql'], cassandra: ['nosql'], mongodb: ['nosql'], dynamodb: ['nosql', 'aws'],
   yugabyte: ['sql', 'distributed systems'], dbt: ['elt', 'data modeling'], 'etl pipelines': ['etl', 'data pipelines'], 'github actions': ['ci/cd'], jenkins: ['ci/cd'], 'azure devops': ['ci/cd'],
@@ -85,7 +86,9 @@ const SEMANTIC = {
   etl: /\bextract(?:ed|ing|ion)?\b[^\n.!?]{0,160}\btransform(?:ed|ing|ation)?\b[^\n.!?]{0,160}\bload(?:ed|ing)?\b/i,
   // Moving records between databases through explicitly built data jobs is a
   // pipeline. Scheduling unrelated work or merely studying it is not evidence.
-  'data pipelines': /\b(?:built|implemented|created|developed|delivered)\b[^\n.!?]{0,70}\b(?:data|sql|etl)\b[^\n.!?]{0,50}\b(?:jobs?|workflows?)\b[^\n.!?]{0,70}\b(?:mov(?:e|ed|ing)|transfer(?:red|ring)?)\b[^\n.!?]{0,35}\b(?:records?|data)\b[^\n.!?]{0,35}\b(?:between\s+(?:\w+\s+){0,3}(?:databases?|warehouses?)|from\s+(?:\w+\s+){0,3}(?:databases?|warehouses?)\s+to\s+(?:\w+\s+){0,3}(?:databases?|warehouses?))\b/i,
+  'data pipelines': /\b(?:built|implemented|created|developed|delivered)\b[^\n.!?]{0,70}\b(?:data|sql|etl)\b[^\n.!?]{0,50}\b(?:jobs?|workflows?)\b[^\n.!?]{0,70}\b(?:mov(?:e|ed|ing)|transfer(?:red|ring)?)\b[^\n.!?]{0,35}\b(?:records?|data)\b[^\n.!?]{0,35}\b(?:between\s+(?:\w+\s+){0,3}(?:databases?|warehouses?)|from\s+(?:\w+\s+){0,3}(?:databases?|warehouses?)\s+to\s+(?:\w+\s+){0,3}(?:databases?|warehouses?))\b|\b(?:built|implemented|created|developed|delivered|wrote|designed)\b[^\n.!?]{0,60}\b(?:jobs?|workflows?|flows?|processes)\b[^\n.!?]{0,60}\b(?:mov(?:e|es|ed|ing)|load(?:s|ed|ing)?|ingest(?:s|ed|ing)?|transfer(?:s|red|ring)?|cop(?:y|ies|ied|ying)|sync(?:s|ed|ing)?)\b[^\n.!?]{0,40}\b(?:records?|data|files?|events?)\b[^\n.!?]{0,30}\bfrom\b[^\n.!?]{2,50}\b(?:into|to)\s+\S/i,
+  // Working directly with named colleagues or teams to deliver something is collaboration.
+  collaboration: /\b(?:worked|partnered|collaborated|teamed|paired)\s+(?:closely\s+|directly\s+)?with\b[^\n.!?]{0,80}\b(?:managers?|analysts?|engineers?|scientists?|designers?|developers?|stakeholders?|teams?|clients?|customers?|leadership|executives?)\b/i,
   'data visualization': /\b(?:built|created|designed|developed|produced)\b[^\n.!?]{0,100}\b(?:charts?|graphs?|data visuali[sz]ations?)\b|\b(?:built|created|designed|developed)\b[^\n.!?]{0,80}\bdashboards?\b[^\n.!?]{0,100}\b(?:charts?|graphs?|visuali[sz](?:e|ation|ations)|metrics|kpis?)\b/i,
 };
 export const hasTerm = (text, term) => [term, ...(ALIASES_OF[term] || [])].some((value) => termRe(value).test(String(text || '')));
@@ -102,7 +105,9 @@ export const directHas = (value, term) => directMatch(claimText(value), term);
 export const textHas = (text, term) => directHas(text, term) || (IMPLIED_BY[term] || []).some((specific) => directHas(text, specific));
 
 const TITLE_STOP = new Set(['senior', 'sr', 'junior', 'jr', 'lead', 'staff', 'principal', 'i', 'ii', 'iii', 'iv', 'v', 'and', 'of', 'the', 'for', 'to', 'a', 'an', 'with', 'in', 'at', 'remote', 'hybrid', 'us', 'usa', 'new', 'grad']);
-export const titleWords = (title) => String(title || '').toLowerCase().replace(/\(.*?\)/g, ' ').split(/[^a-z0-9+#.]+/).filter((word) => word.length > 1 && !TITLE_STOP.has(word) && !/^\d+$/.test(word));
+export const titleWords = (title) => String(title || '').toLowerCase().replace(/\(.*?\)/g, ' ').split(/[^a-z0-9+#.]+/).filter((word) => word.length > 1 && !TITLE_STOP.has(word) && !/^\d+$/.test(word)
+  // Requisition codes such as "AMZ27926.2" are not part of the job title.
+  && !/\d{3,}/.test(word));
 const SECTION_NAMES = {
   summary: /^(professional\s+)?(summary|profile|objective|about( me)?)$/i,
   experience: /^(work\s+|professional\s+|relevant\s+)?(experience|employment( history)?|work history)$/i,
@@ -249,11 +254,10 @@ function clauseGroups(clause) {
     const bridge = clause.source.slice(hits[index - 1].end, hits[index].start);
     if (/^\s*,?\s*(?:or|and\/or)\s*$/i.test(bridge)) {
       join(index - 1, index);
-      if (/^\s*,/.test(bridge) || /\b(?:one of|either)\b/i.test(clause.source.slice(0, hits[index - 1].start))) {
-        for (let previous = index - 1; previous > 0; previous--) {
-          if (!/^\s*,\s*$/.test(clause.source.slice(hits[previous - 1].end, hits[previous].start))) break;
-          join(previous - 1, previous);
-        }
+      // "AWS, GCP or Azure" is one choice, with or without the comma before "or".
+      for (let previous = index - 1; previous > 0; previous--) {
+        if (!/^\s*,\s*$/.test(clause.source.slice(hits[previous - 1].end, hits[previous].start))) break;
+        join(previous - 1, previous);
       }
     }
   }
@@ -301,6 +305,10 @@ export function jobKeywords(job = {}) {
 }
 
 export const TARGET_SCORE = 85;
+/** How much each requirement counts: a missing "preferred" skill costs less than a missing "required" one. */
+export const PRIORITY_WEIGHT = { required: 1, unspecified: 0.6, preferred: 0.35 };
+const weigh = (groups) => groups.reduce((sum, group) => sum + (PRIORITY_WEIGHT[group.priority] ?? PRIORITY_WEIGHT.unspecified), 0);
+const matchedShare = (groups) => (groups.length ? weigh(groups.filter((group) => group.status === 'matched')) / weigh(groups) : 0);
 /** Heuristic matching, not an employer's proprietary ATS score or a hiring guarantee. */
 export function atsReport(resumeText, job) {
   const text = String(resumeText || '');
@@ -335,14 +343,15 @@ export function atsReport(resumeText, job) {
   const lower = evidence.toLowerCase();
   const titleHit = tWords.filter((word) => new RegExp(`\\b${escapeRe(word)}(?=$|[^a-z0-9])`, 'i').test(lower));
   const parts = {
-    hardSkills: { weight: 55, matched: hardGroups.filter((group) => group.status === 'matched').length, total: hardGroups.length },
+    hardSkills: { weight: 55, matched: hardGroups.filter((group) => group.status === 'matched').length, total: hardGroups.length, share: matchedShare(hardGroups) },
     title: { weight: 15, matched: titleHit.length, total: tWords.length },
-    softSkills: { weight: 10, matched: softGroups.filter((group) => group.status === 'matched').length, total: softGroups.length },
+    // One passing mention of a soft skill should not decide a tenth of the score: full weight needs three or more.
+    softSkills: { weight: Math.min(10, Math.round(10 * softGroups.length / 3)), matched: softGroups.filter((group) => group.status === 'matched').length, total: softGroups.length, share: matchedShare(softGroups) },
     format: { weight: 20, matched: checks.filter((check) => check.ok).length, total: checks.length },
   };
   const used = Object.values(parts).filter((part) => part.total > 0);
   const totalWeight = used.reduce((sum, part) => sum + part.weight, 0);
-  const score = Math.round(used.reduce((sum, part) => sum + part.weight / totalWeight * part.matched / part.total, 0) * 100);
+  const score = Math.round(used.reduce((sum, part) => sum + part.weight / totalWeight * (part.share ?? part.matched / part.total), 0) * 100);
   const missingHard = [...new Set(hardGroups.filter((group) => group.status === 'missing').flatMap((group) => group.terms))];
   const missingSoft = [...new Set(softGroups.filter((group) => group.status === 'missing').flatMap((group) => group.terms))];
   return { score, matched: [...hardHit, ...softHit], missing: [...missingHard, ...missingSoft], missingHard, requirements, learningTerms, breakdown: parts, checks, words };

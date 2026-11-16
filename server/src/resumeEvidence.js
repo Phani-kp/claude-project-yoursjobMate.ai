@@ -29,11 +29,18 @@ const frameActions = [
   ['lead', 'led', 'leading', 'leadership'],
   ['manage', 'managed', 'managing', 'management'],
   ['automate', 'automated', 'automating', 'automation'],
-  ['schedule', 'scheduled', 'scheduling'],
+  // Scheduling workflows in an orchestrator is orchestration.
+  ['schedule', 'scheduled', 'scheduling', 'orchestrate', 'orchestrated', 'orchestrating'],
+  // Plain synonyms that claim nothing more than the source verb.
+  ['fix', 'fixed', 'fixing', 'resolve', 'resolved', 'resolving'],
+  ['worked', 'partner', 'partnered', 'partnering', 'collaborate', 'collaborated', 'collaborating'],
+  ['package', 'packaged', 'packaging', 'containerize', 'containerized', 'containerizing'],
+  ['monitor', 'monitored', 'monitoring'], ['define', 'defined', 'defining'], ['answer', 'answered', 'answering'],
+  ['track', 'tracked', 'tracking'], ['test', 'tested', 'testing'],
 ];
 const actionOf = new Map(frameActions.flatMap((family, index) => family.map((word) => [word, `action:${index}`])));
 const neutralWords = new Set(`a an and are as at be been being by can did do does during each for from had has have in including into is it its of on or our that the their these this those through to using use used via was were which while with within without
-  experience experienced skill skills knowledge proficiency proficient professional background expertise capability capabilities technical practical hands hands-on include includes including
+  experience experienced skill skills skilled knowledge proficiency proficient professional background expertise capability capabilities technical practical hands hands-on include includes including
   reliable robust clear consistent repeatable useful maintainable effective efficiently successfully effectively collaboratively`.split(/\s+/));
 const nounFamilies = [
   ['app', 'apps', 'application', 'applications'],
@@ -46,6 +53,7 @@ const nounFamilies = [
   ['customer', 'customers'], ['client', 'clients'], ['user', 'users'],
   ['source', 'sources'], ['file', 'files'], ['team', 'teams'],
   ['check', 'checks'], ['metric', 'metrics'],
+  ['problem', 'problems', 'issue', 'issues'], ['question', 'questions'],
 ];
 const nounOf = new Map(nounFamilies.flatMap((family) => family.map((word) => [word, family[0]])));
 const metricOutcomes = [
@@ -99,12 +107,18 @@ function frames(text, original = text) {
     normalized = normalized.replace(new RegExp(`(^|[^a-z0-9])${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[^a-z0-9])`, 'gi'), `$1${term}`);
   }
   normalized = normalized.replace(/\bresponse time\b|\bload time\b|\bloading time\b/g, 'latency');
+  // A named skill is one unit, not loose words: "data warehousing" must be supported as that skill (checked through
+  // its skill: anchor below and by the caller), so its words are not also treated as new nouns.
+  const skillTerms = termsIn(text);
+  for (const term of [...skillTerms].sort((a, b) => b.length - a.length)) {
+    normalized = normalized.replace(new RegExp(`(^|[^a-z0-9])${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[^a-z0-9])`, 'gi'), '$1 ');
+  }
   const actions = new Set(), anchors = new Set();
   for (let word of normalized.match(/[a-z][a-z0-9+#.-]*/g) || []) {
     word = word.replace(/[.-]+$/, '');
     if (!word || neutralWords.has(word) || /ly$/.test(word)) continue;
     let action = actionOf.get(word);
-    if (routine && /^(?:schedule|scheduled|scheduling|automate|automated|automating|automation)$/.test(word)) action = 'action:routine-data-work';
+    if (routine && /^(?:schedule|scheduled|scheduling|orchestrate|orchestrated|orchestrating|automate|automated|automating|automation)$/.test(word)) action = 'action:routine-data-work';
     if (action) { actions.add(action); continue; }
     if (dataWork && /^(?:jobs?|tasks?|workflows?|pipelines?)$/.test(word)) word = 'workflow';
     else if (webWork && /^(?:interfaces?|apps?|applications?)$/.test(word)) word = 'web-interface';
@@ -113,7 +127,7 @@ function frames(text, original = text) {
   }
   // Equivalent descriptions may use a canonical skill instead of its original
   // phrase. Skills remain separately constrained to the correct source scope.
-  for (const term of termsIn(text)) anchors.add(`skill:${term}`);
+  for (const term of skillTerms) anchors.add(`skill:${term}`);
   return { actions, anchors };
 }
 
@@ -208,7 +222,9 @@ export function preserveResumeFacts(candidate, source, experienceScopes = []) {
   result.headline = source.headline;
   for (const sentence of source.summary.split(/(?<=[.!?])\s+/)) {
     if ((numbers(sentence).length || /\b(certified|certification|degree|licensed)\b/i.test(sentence))
-      && !normal(result.summary).includes(normal(sentence))) result.summary = `${result.summary} ${sentence}`.trim();
+      && !normal(result.summary).includes(normal(sentence))
+      // A rewritten sentence that already carries the same figures replaces the original instead of repeating it.
+      && !(numbers(sentence).length && !/\b(certified|certification|degree|licensed)\b/i.test(sentence) && metricClaimsSupported(sentence, result.summary))) result.summary = `${result.summary} ${sentence}`.trim();
   }
   result.sections = source.sections.map((section) => {
     const proposed = candidate.sections.find((s) => s.title === section.title);

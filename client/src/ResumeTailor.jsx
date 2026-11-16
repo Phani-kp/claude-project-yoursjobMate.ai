@@ -11,12 +11,27 @@ const normal = (value) => String(value || '').trim().toLowerCase();
 function Breakdown({ parts }) {
   if (!parts) return null;
   return <ul className="breakdown">{Object.entries(PARTS).filter(([key]) => parts[key]?.total).map(([key, label]) => <li key={key} title={`Worth ${parts[key].weight}% of the score`}>
-    <span>{label}</span><span className="bar-track"><i style={{ width: `${Math.round((parts[key].matched / parts[key].total) * 100)}%` }} /></span><b>{parts[key].matched}/{parts[key].total}</b>
+    <span>{label}</span><span className="bar-track"><i style={{ width: `${Math.round((parts[key].share ?? parts[key].matched / parts[key].total) * 100)}%` }} /></span><b>{parts[key].matched}/{parts[key].total}</b>
   </li>)}</ul>;
 }
 
 export function AtsScore({ score, label = 'Estimated alignment' }) {
   return <div className="ats-score"><b>{score}%</b><span>{label}<small>Estimated alignment</small></span></div>;
+}
+
+/** A skill category as one line: the uploaded resume's own wording first, then anything tailoring added. */
+function skillGroupText(group) {
+  const items = list(group.items);
+  if (!group.text) return items.join(', ');
+  const written = group.text.replace(/[.\s]+$/, '');
+  const lower = written.toLowerCase();
+  return [written, ...items.filter((item) => !lower.includes(String(item).toLowerCase()))].join(', ');
+}
+
+/** Role lines are bold; an entry without bullets ("Master's in X | University") is bold up to the first separator. */
+function roleLine(line, hasBullets) {
+  const cut = hasBullets ? -1 : line.search(/\s[|–—-]\s/);
+  return cut < 0 ? <b>{line}</b> : <><b>{line.slice(0, cut)}</b>{line.slice(cut)}</>;
 }
 
 /** Render the same final fields used by Word export, with plain-text fallback for older saved versions. */
@@ -29,18 +44,23 @@ export function ResumePreview({ tailored }) {
       {resume.headline && <p className="resume-headline">{resume.headline}</p>}
       {list(resume.contact).length > 0 && <p className="resume-contact">{resume.contact.join(' · ')}</p>}
     </header>
-    {resume.summary && <section><h4>Professional Summary</h4><p>{resume.summary}</p></section>}
+    {resume.summary && <section><h4>{resume.labels?.summary || 'Professional Summary'}</h4><p>{resume.summary}</p></section>}
     {(list(resume.skillGroups).length > 0 || list(resume.skills).length > 0) && <section>
-      <h4>Skills</h4>
+      <h4>{resume.labels?.skills || 'Skills'}</h4>
       {list(resume.skillGroups).length > 0
-        ? resume.skillGroups.map((group, index) => <p key={`${group.name}-${index}`}><b>{group.name}:</b> {list(group.items).join(', ')}</p>)
+        ? resume.skillGroups.map((group, index) => <p key={`${group.name}-${index}`}><b>{group.name}:</b> {skillGroupText(group)}</p>)
         : <p>{list(resume.skills).join(', ')}</p>}
     </section>}
     {list(resume.sections).map((section, sectionIndex) => <section key={`${section.title}-${sectionIndex}`}>
-      <h4>{section.title}</h4>
+      <h4>{section.label || section.title}</h4>
       {list(section.items).map((item, itemIndex) => <div className="resume-role" key={`${item.heading}-${itemIndex}`}>
-        <div className="resume-role-heading"><b>{item.heading}</b>{item.dates && <span>{item.dates}</span>}</div>
-        {item.subheading && <p className="resume-role-subheading">{item.subheading}</p>}
+        {/* The role's own header lines, as written on the uploaded resume, when it had them. */}
+        {list(item.lines).length > 0
+          ? item.lines.map((line, index) => <p className="resume-role-line" key={index}>{roleLine(line, list(item.bullets).length > 0)}</p>)
+          : <>
+            <div className="resume-role-heading"><b>{item.heading}</b>{item.dates && <span>{item.dates}</span>}</div>
+            {item.subheading && <p className="resume-role-subheading">{item.subheading}</p>}
+          </>}
         {list(item.bullets).length > 0 && <ul>{item.bullets.map((bullet, index) => <li key={index}>{bullet}</li>)}</ul>}
       </div>)}
     </section>)}

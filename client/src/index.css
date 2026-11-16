@@ -343,3 +343,7 @@ label.check.big { font-size: 15px; }
 .resume-tailor .resume-disclosure-content h5 { margin: 0 0 6px; }
 .resume-tailor .resume-skill-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 14px; }
 .resume-tailor .resume-skill-options label { font-size: 13px; }
+
+/* Tailored resume preview: header centred and role lines stacked, as on the uploaded resume and the Word file. */
+.resume-tailor .resume-document header { text-align: center; }
+.resume-tailor .resume-document .resume-role-line { margin: 0; color: #172033; }
