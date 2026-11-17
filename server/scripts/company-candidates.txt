@@ -1,0 +1,695 @@
+# Company names to check for a public careers feed on Greenhouse, Lever or Ashby.
+# One per line. "Name=token" sets the feed token when it is not simply the name in lower case without spaces.
+# Run: node scripts/discover-boards.js   (only names that really have a feed with US jobs are kept)
+Abridge
+Acorns
+Addepar
+Adyen
+Aircall
+Airwallex
+Akuna Capital=akunacapital
+Alchemy
+Algolia
+Alloy
+Allbirds
+AlphaSense
+Alto Pharmacy=alto
+Amplitude
+Anduril=andurilindustries
+Anaplan
+Angi
+AngelList
+Anyscale
+Apollo.io=apolloio
+AppFolio
+Appian
+Applied Intuition=appliedintuition
+Arcadia
+Arista Networks=aristanetworks
+Armis
+Articulate
+Asurion
+Attentive
+Aurora=aurorainnovation
+Automattic
+Avant
+AvidXchange
+Axon
+Axonius
+Benchling
+BetterUp
+Bill=billcom
+Bitgo
+BitMEX
+Blend
+Blockchain.com=blockchain
+Bloomreach
+Blue Origin=blueorigin
+Bolt
+Boston Dynamics=bostondynamics
+Box=boxinc
+Braze
+Bright Horizons
+Brightline
+Built Technologies=getbuilt
+Bumble
+C3 AI=c3iot
+Cameo
+Capsule
+Cardlytics
+CarGurus
+Carbon Health=carbonhealth
+Carvana
+Casper
+Cedar
+Celonis
+Cerebras=cerebrassystems
+Chainalysis
+Checkout.com=checkout
+Checkr
+Chewy
+Chief
+Circle
+Cityblock Health=cityblockhealth
+ClassPass
+Clari
+Clear=clear
+Clearbit
+ClickUp
+Clio
+Cloudera
+Clover Health=cloverhealth
+Cockroach Labs=cockroachlabs
+Coda
+Cohere
+Collibra
+Color=color
+Commure
+Compass
+ComplyAdvantage
+Confluent
+Contentful
+Convoy
+Corelight
+Coupa
+Coupang
+Course Hero=coursehero
+Cribl
+Cross River=crossriverbank
+Cruise
+Culture Amp=cultureamp
+Curology
+Cvent
+Dataiku
+Datavant
+dbt Labs=dbtlabsinc
+Deel
+DeepMind
+Demandbase
+Descript
+Devoted Health=devoted
+Dialpad
+DigitalOcean=digitalocean98
+Discord
+Docker
+DocuSign
+Domino Data Lab=dominodatalab
+Doximity
+DraftKings
+Drata
+Dremio
+DriveWealth
+Druva
+Dutchie
+Earnin
+Eight Sleep=eightsleep
+Enfusion
+Envoy
+Epic Games=epicgames
+Etsy
+Eventbrite
+Everlaw
+Evolv
+Exabeam
+Expel
+Extend
+Fanatics
+Fastly
+Fetch=fetchrewards
+FIGS
+Figure=figure
+Fireblocks
+Fivetran
+Flatiron Health=flatironhealth
+Flock Safety=flocksafety
+Flywire
+Forter
+Foursquare=foursquare26
+Front
+Funding Circle=fundingcircle
+G2
+Gametime
+Garner Health=garnerhealth
+Glassdoor
+GlossGenius
+Glean=gleanwork
+GoFundMe
+GoodRx
+Gopuff
+Grafana Labs=grafanalabs
+Grammarly
+Greenhouse
+Grubhub
+Guild=guild
+Handshake
+Harness
+HashiCorp
+Headspace=hs
+Headway
+Heap
+Hims & Hers=himshers
+Hinge Health=hingehealth
+Hippo
+Homebase
+HoneyBook
+Hopper
+Houzz
+Hudson River Trading=wehrtyou
+Human Interest=humaninterest
+Illumio
+Imply
+Indigo
+InfluxData
+Inspectorio
+Instabase
+Instawork
+Intercom
+Iterable
+Jane Street=janestreet
+Jobber
+Jump Trading=jumptrading
+Justworks
+Kandji
+Karat
+Kayak
+Kiavi
+Kickstarter
+Knock
+KnowBe4
+Komodo Health=komodohealth
+Kong
+Kraken
+Lacework
+Lambda=lambda
+LaunchDarkly
+Leafly
+LegalZoom
+Lemonade
+LendingClub
+LendingTree
+Lime
+Liftoff
+LiveRamp
+Loom
+Lucid=lucidsoftware
+Lyra Health=lyrahealth
+Magic Leap=magicleapinc
+Marqeta
+Masterclass
+Mattermost
+Medallia
+Medium
+Mercury
+Meesho
+Melio
+MessageBird
+Mews
+Mindbody
+Miro=realtimeboardglobal
+Modern Treasury=moderntreasury
+Monte Carlo=montecarlodata
+Motive=gomotive
+Moveworks
+Mural
+MX
+Mysten Labs=mystenlabs
+N26
+Nabis
+Navan=tripactions
+Nerdwallet
+Netlify
+Neuralink
+Newfront
+Nextiva
+Niantic
+Noom
+Nomi Health=nomihealth
+Notion
+Nuna
+Nutanix
+Nylas
+Olo
+Omada Health=omadahealth
+OneTrust
+Opendoor
+OpenSea
+OpenTable
+Optiver=optiverus
+Orca Security=orcasecurity
+Oura
+Outreach
+Outschool
+PagerDuty
+Palantir
+Pantheon
+Papa
+Paradigm
+Patreon
+Pave
+PayJoy
+Peloton
+Pendo
+Persona
+Petal
+Pilot=pilothq
+Pindrop
+Planet=planetlabs
+Plaid
+PlanetScale
+Podium
+Point72
+Policygenius
+Poshmark
+Postman
+Procore=procoretechnologies
+Productboard
+Proofpoint
+PubMatic
+Pure Storage=purestorage
+Qualia
+Qualtrics
+Quantcast
+Quizlet
+Quora
+Rad AI=radai
+Rapid7
+Recharge
+Recursion=recursionpharmaceuticals
+Redfin
+Redis
+Remitly
+Rent the Runway=renttherunway
+Replit
+Restaurant365
+Rev
+Rippling
+Riskified
+Rivian
+Rocket Lab=rocketlab
+Rokt
+Roku
+Root=rootinsurance
+Rubrik
+Runway=runwayml
+Samsara
+SeatGeek
+Seismic
+Sentry
+SentinelOne
+ServiceTitan
+Shift4
+ShipBob
+Shippo
+Sigma Computing=sigmacomputing
+SimpliSafe
+Singular
+Skydio
+Slice
+SmartAsset
+Smartling
+SmartNews
+Snorkel AI=snorkelai
+Snyk
+Socure
+Sonder
+Sourcegraph=sourcegraph91
+Splash
+Spring Health=springhealth
+SpotHero
+Spotnana
+Squarespace
+StackAdapt
+Starburst=starburstdata
+StockX
+Strava
+StubHub
+Sword Health=swordhealth
+Tanium
+Tala
+TaskRabbit
+Tempus
+Tenable
+Thumbtack
+Tinder
+TodayTix
+Toptal
+Tradeweb
+Trade Desk=thetradedesk
+Transcarent
+TripAdvisor
+Truework
+Trulioo
+Turo
+Twitch
+Two Sigma=twosigma
+Udacity
+Unite Us=uniteus
+Unity=unity3d
+Upgrade
+Upstart
+Upwork
+Vanta
+Varo=varomoney
+Vectra
+Veeva
+Venmo
+Veracode
+Verily
+VideoAmp
+Vimeo
+Virta Health=virtahealth
+Vonage
+Vouch
+VTS
+Wealthfront
+Weave
+Webflow
+Whatnot
+Wheel
+WHOOP
+Wise=transferwise
+Wiz
+Workato
+Workiva
+Workrise
+Xometry
+Yext
+Yotpo
+Yubico
+Zapier
+Zendesk
+Zenefits
+Zeta
+Zillow
+Zip=ziphq
+Zipline=flyzipline
+ZipRecruiter
+Zocdoc
+Zola
+Zoox
+Zuora
+Zus Health=zushealth
+1Password=1password
+6sense=6sense
+Abnormal Security=abnormalsecurity
+Accolade
+Adept
+AeroVironment
+Affinity
+Afresh
+Agility Robotics=agilityrobotics
+AI21
+Airbyte
+Aisera
+Akasa
+Alation
+Altana
+Altruist
+Amperity
+Ampla
+Anchorage Digital=anchorage
+Anrok
+Apiary
+Apex Fintech Solutions=apexfintechsolutions
+AppDirect
+Aptos=aptoslabs
+Arize AI=arizeai
+Artera
+Ascend
+Assembled
+AssemblyAI
+AtoB
+Atlan
+Atomic
+Attain
+Augment Code=augmentcomputing
+Avalanche=avalabs
+Baseten
+Bestow
+Beyond Identity=beyondidentity
+BigID
+Bilt Rewards=biltrewards
+Biorender
+Bland AI=blandai
+Block Renovation=blockrenovation
+Bluesky
+Boulevard
+Brightwheel
+Brigit
+Browserbase
+Built In=builtin
+Cadence=cadencesolutions
+Calm
+Candid Health=candidhealth
+Canonical
+Captions
+Carbon Robotics=carbonrobotics
+Cargurus
+Cars Commerce=carscommerce
+Cedar=cedar
+Census
+Chalk
+Character AI=character
+Charlie Health=charliehealth
+Checkmate
+Chronosphere
+Clay=claylabs
+Cleo
+ClickHouse
+Clipboard Health=clipboardhealth
+Cloudinary
+Coalesce
+Coalition=coalition
+Cognition
+Column
+Common Room=commonroom
+Conduktor
+Convex=convexdev
+Copilot
+CoreWeave
+Cortex
+Cresta
+Crusoe=crusoeenergy
+Cursor=anysphere
+Cyera
+Dagster Labs=dagsterlabs
+Datadome
+Dave
+Decagon
+Deepgram
+Density
+Dexterity
+Ditto
+Doppler
+Dovetail
+DuckDuckGo
+Dune
+Dust
+EarnUp
+EasyPost
+Eco
+EightfoldAI=eightfoldai
+ElevenLabs
+Elicit
+Ello
+Empower=empower
+EvenUp
+Evisort
+Exa
+Fabric
+Faro Health=farohealth
+Fathom
+Fermat
+Fiddler AI=fiddlerai
+Figure AI=figureai
+Finch
+Fingerprint
+Fireworks AI=fireworksai
+Firstbase
+Flex
+Fly.io=flyio
+Found
+Freenome
+Gather
+Gecko Robotics=geckorobotics
+Genesis Therapeutics=genesistherapeutics
+Giga
+Ginkgo Bioworks=ginkgobioworks
+GitBook
+Gladly
+Goldbelly
+Gong=gongio
+Graphite
+Greenlight
+Groq
+Gusto
+Halcyon
+Harvey
+Hex
+Hightouch
+Hive
+Honor
+Hugging Face=huggingface
+Humane
+Hyperscience
+Imbue
+Incident.io=incident
+Inngest
+Instrumental
+Ironclad
+Jasper
+Juniper Square=junipersquare
+Kalshi
+Keeper Security=keepersecurity
+Kindbody
+Kittyhawk
+Klarna
+Kojo
+Labelbox
+LangChain
+Lattice
+Lead Bank=leadbank
+Legion
+Lightning AI=lightningai
+Linear
+LiveKit
+Lob
+Loop
+Luma AI=lumaai
+Lumos
+Machinify
+Magic=magic
+Material Security=materialsecurity
+Maven Clinic=mavenclinic
+Medely
+Mem
+Mercor
+Merge
+Metronome
+Mistral AI=mistral
+Mixpanel
+Modal=modal
+Modular
+MotherDuck
+Motion
+Mux
+Nango
+Neon
+Nimble
+Nooks
+Normal Computing=normalcomputing
+Nuvocargo
+Observe
+Odyssey
+Ollie
+Onebrief
+OneSignal
+OpenAI
+OpenPhone
+Orb
+Oscilar
+Owner
+Oxide=oxidecomputer
+Pachama
+Parafin
+Parloa
+Patch
+Perplexity
+Physical Intelligence=physicalintelligence
+Pinecone
+Plenful
+Poolside
+PostHog
+Prefect
+Primer
+Pylon=pylon-labs
+Qdrant
+Quince
+Ramp
+Rad Power Bikes=radpowerbikes
+Railway
+Reducto
+Replicate
+Resend
+Retool
+Rho
+Rilla
+Ro
+Roboflow
+Rula
+Runpod
+Rutter
+Saronic
+Sardine
+Scribe
+Sierra
+Sift
+Skild AI=skildai
+Slash
+Smartcar
+Snowplow
+Solugen
+Spot AI=spotai
+Stainless
+Stedi
+Stytch
+Substack
+Suno
+Supabase
+Superhuman
+Sweetgreen
+Sword
+Sydecar
+Synthesia
+Tabs
+Tailscale
+Tavus
+Tecton
+Teleport
+Temporal=temporaltechnologies
+Tennr
+Thatch
+Together AI=togetherai
+Trace Machina=tracemachina
+Traba
+Tremendous
+TrueLayer
+Turing
+Twelve Labs=twelvelabs
+Unify
+Vannevar Labs=vannevarlabs
+Vapi
+Varda=vardaspace
+Vast=vast
+Vercel
+Verkada
+Vise
+Warp
+Watershed
+Wayve
+Weights & Biases=wandb
+WorkOS
+Writer
+xAI
+Zed=zedindustries
+Zepto

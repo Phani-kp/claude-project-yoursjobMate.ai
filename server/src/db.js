@@ -245,6 +245,8 @@ CREATE TABLE IF NOT EXISTS company_boards (
   UNIQUE(ats, token)
 );
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS details_fetched INTEGER DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dedupe_key TEXT DEFAULT '';  -- normalised "company|title": the same posting from different sources shares it
+CREATE INDEX IF NOT EXISTS idx_jobs_dedupe ON jobs(dedupe_key);
 
 -- Jobs a user bookmarked to tailor and apply to later.
 CREATE TABLE IF NOT EXISTS saved_jobs (

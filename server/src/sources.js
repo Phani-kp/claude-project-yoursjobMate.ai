@@ -432,8 +432,12 @@ async function jsearch(searchTerms) {
   return jobs;
 }
 
+// Keyword sources that need an API key have monthly request limits on their free plans, so they refresh less
+// often than the company career sites. `every` is the shortest gap between two pulls of that source.
+const API_SYNC_EVERY_MS = Number(process.env.API_SYNC_EVERY_MS) || 6 * 60 * 60_000;
+
 /**
- * Every enabled source as { key, label, full, run }.
+ * Every enabled source as { key, label, full, run, every? }.
  * extraBoards: companies users added in the app (company_boards table), on top of the built-in list.
  */
 export function sourceList(searchTerms = [], extraBoards = []) {
@@ -446,8 +450,8 @@ export function sourceList(searchTerms = [], extraBoards = []) {
     { key: 'remoteok', label: 'Remote OK', full: true, run: remoteok },
     { key: 'themuse', label: 'The Muse', full: false, run: themuse },
   );
-  if (process.env.ADZUNA_APP_ID && process.env.ADZUNA_APP_KEY) list.push({ key: 'adzuna', label: 'Adzuna', full: false, run: () => adzuna(searchTerms) });
-  if (process.env.USAJOBS_API_KEY && process.env.USAJOBS_EMAIL) list.push({ key: 'usajobs', label: 'USAJOBS', full: false, run: () => usajobs(searchTerms) });
-  if (process.env.JSEARCH_API_KEY) list.push({ key: 'jsearch', label: 'JSearch (LinkedIn, Indeed, Glassdoor…)', full: false, run: () => jsearch(searchTerms) });
+  if (process.env.ADZUNA_APP_ID && process.env.ADZUNA_APP_KEY) list.push({ key: 'adzuna', label: 'Adzuna', full: false, every: API_SYNC_EVERY_MS, run: () => adzuna(searchTerms) });
+  if (process.env.USAJOBS_API_KEY && process.env.USAJOBS_EMAIL) list.push({ key: 'usajobs', label: 'USAJOBS', full: false, every: API_SYNC_EVERY_MS, run: () => usajobs(searchTerms) });
+  if (process.env.JSEARCH_API_KEY) list.push({ key: 'jsearch', label: 'JSearch (LinkedIn, Indeed, Glassdoor…)', full: false, every: API_SYNC_EVERY_MS, run: () => jsearch(searchTerms) });
   return list;
 }

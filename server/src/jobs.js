@@ -5,13 +5,30 @@ import { LEVEL_PATTERNS, atsReport, detectResumeProfile } from './resume.js';
 
 /** Only US jobs posted within this many days are kept and shown. */
 export const MAX_AGE_DAYS = Number(process.env.JOB_MAX_AGE_DAYS) || 30;
-const CONCURRENCY = Number(process.env.SYNC_CONCURRENCY) || 8;
+// Every company's feed is on its own path or host, so a higher limit shortens a full refresh without flooding one site.
+const CONCURRENCY = Number(process.env.SYNC_CONCURRENCY) || 16;
+
+const COMPANY_SUFFIX = /\b(incorporated|inc|llc|l\.l\.c|ltd|limited|corp|corporation|co|company|plc|gmbh|holdings|group)\b\.?/g;
+const squash = (s) => String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ');
+/**
+ * "company|title" in a normalised form, so the same posting is recognised when two sources write it differently:
+ * "Acme, Inc." and "ACME" match, and so do "Sr. Data Engineer (Remote)" and "Senior Data Engineer".
+ * Empty when either part is missing, so unknown companies never match each other.
+ */
+export function dedupeKey(company, title) {
+  const c = squash(company).replace(COMPANY_SUFFIX, ' ').replace(/[^a-z0-9]+/g, '');
+  const t = squash(title).replace(/\([^)]*\)|\[[^\]]*\]/g, ' ').replace(/\bsr\b\.?/g, 'senior').replace(/\bjr\b\.?/g, 'junior')
+    // A trailing location or work mode is not part of the title: "Data Engineer - Remote", "Data Engineer, Austin TX".
+    .replace(/\s[-–—|,]\s*(remote|hybrid|onsite|on-site|us|usa|united states)\b.*$/, ' ')
+    .replace(/[^a-z0-9+#]+/g, ' ').trim();
+  return c && t && c !== 'unknown' ? `${c}|${t}` : '';
+}
 
 // Jobs a user applied to or saved are never deleted by clean-up, so their links keep working.
 const UNREFERENCED = `NOT EXISTS (SELECT 1 FROM applications a WHERE a.job_id = jobs.id)
   AND NOT EXISTS (SELECT 1 FROM saved_jobs s WHERE s.job_id = jobs.id)`;
 
-const COLS = ['external_id', 'source', 'source_key', 'title', 'company', 'location', 'city', 'states', 'country', 'remote', 'salary', 'job_type', 'url', 'description', 'tags', 'posted_at', 'posted_ts'];
+const COLS = ['external_id', 'source', 'source_key', 'title', 'company', 'location', 'city', 'states', 'country', 'remote', 'salary', 'job_type', 'url', 'description', 'tags', 'posted_at', 'posted_ts', 'dedupe_key'];
 
 // description/states/city stay as fetched when a list-only source (Workday, SmartRecruiters) sends them empty.
 const UPDATABLE = COLS.filter((c) => c !== 'external_id');
@@ -27,6 +44,7 @@ export async function saveJobs(jobs, sourceKey) {
       j.external_id, j.source, sourceKey, j.title.slice(0, 300), (j.company || 'Unknown').slice(0, 200), (j.location || '').slice(0, 300),
       (j.city || '').slice(0, 100), j.states.length ? `,${j.states.join(',')},` : '', 'US', j.remote ? 1 : 0, j.salary || '',
       j.job_type || '', j.url || '', j.description || '', (j.tags || []).join(',').slice(0, 500), j.posted_at, j.posted_at,
+      dedupeKey(j.company, j.title),
     ]);
     const row = `(${COLS.map(() => '?').join(', ')}, now())`;
     const { rows } = await db.run(`INSERT INTO jobs (${COLS.join(', ')}, seen_at) VALUES ${batch.map(() => row).join(', ')}
@@ -61,10 +79,16 @@ export function syncJobs(searchTerms = []) {
 }
 
 /** Fetches the given sources and stores their US jobs from the last MAX_AGE_DAYS days. */
+// When each rate-limited source was last pulled by this process (see `every` in sourceList).
+const lastPulled = new Map();
+
 async function pullSources(sources, stats) {
   const cutoff = Date.now() - MAX_AGE_DAYS * 864e5;
   const seen = new Set();
   await pool(sources, CONCURRENCY, async (source) => {
+    // A source with a request quota waits out its own interval, however often the company sites refresh.
+    if (source.every && Date.now() - (lastPulled.get(source.key) || 0) < source.every) { stats.waiting++; return; }
+    if (source.every) lastPulled.set(source.key, Date.now());
     try {
       const raw = await source.run();
       const keep = [];
@@ -90,7 +114,7 @@ async function pullSources(sources, stats) {
   });
 }
 
-const newStats = () => ({ added: 0, updated: 0, removed: 0, skippedNonUS: 0, skippedOld: 0, sources: 0, errors: [] });
+const newStats = () => ({ added: 0, updated: 0, removed: 0, skippedNonUS: 0, skippedOld: 0, sources: 0, waiting: 0, duplicates: 0, errors: [] });
 
 /** Pulls only the given company boards (used right after a company is added). */
 export async function syncBoards(boards) {
@@ -100,15 +124,41 @@ export async function syncBoards(boards) {
   return stats;
 }
 
+const JOB_BOARDS = "('jsearch', 'adzuna', 'usajobs', 'themuse', 'remotive', 'remoteok')";
+// Which copy to keep when two job boards list the same posting: the board with the fuller listing first.
+const BOARD_RANK = (alias) => `CASE ${alias}.source_key WHEN 'jsearch' THEN 1 WHEN 'adzuna' THEN 2 WHEN 'usajobs' THEN 3 WHEN 'themuse' THEN 4 WHEN 'remotive' THEN 5 ELSE 6 END`;
+
+/**
+ * Keeps one listing per posting. Returns how many copies were removed.
+ * - A job board's copy goes when the employer's own career site has the same company and title: the employer's
+ *   listing is fresher and its Apply link goes straight to the company.
+ * - When two job boards list the same company, title and place, the copy from the better-ranked board stays.
+ * Jobs a user saved or applied to are never removed. Different locations of one title stay separate listings.
+ */
+export async function removeDuplicates() {
+  // Rows saved before dedupe_key existed get their key here, so duplicates are caught on the first run too.
+  for (const row of await db.all(`SELECT id, company, title FROM jobs WHERE (dedupe_key IS NULL OR dedupe_key = '') AND source_key IN ${JOB_BOARDS}`)) {
+    await db.run('UPDATE jobs SET dedupe_key = ? WHERE id = ?', dedupeKey(row.company, row.title), row.id);
+  }
+  const employer = await db.run(`DELETE FROM jobs WHERE source_key IN ${JOB_BOARDS} AND ${UNREFERENCED}
+    AND EXISTS (SELECT 1 FROM jobs b WHERE b.id <> jobs.id AND b.source_key ~ '^(greenhouse|lever|ashby|workday|smartrecruiters|workable|amazon)'
+      AND ((jobs.dedupe_key <> '' AND b.dedupe_key = jobs.dedupe_key) OR (lower(b.company) = lower(jobs.company) AND lower(b.title) = lower(jobs.title))))`);
+  const boards = await db.run(`DELETE FROM jobs WHERE source_key IN ${JOB_BOARDS} AND dedupe_key <> '' AND ${UNREFERENCED}
+    AND EXISTS (SELECT 1 FROM jobs b WHERE b.id <> jobs.id AND b.source_key IN ${JOB_BOARDS} AND b.dedupe_key = jobs.dedupe_key
+      AND COALESCE(b.states, '') = COALESCE(jobs.states, '') AND lower(COALESCE(b.city, '')) = lower(COALESCE(jobs.city, '')) AND b.remote = jobs.remote
+      AND (${BOARD_RANK('b')} < ${BOARD_RANK('jobs')} OR (${BOARD_RANK('b')} = ${BOARD_RANK('jobs')} AND b.id < jobs.id)))`);
+  return employer.count + boards.count;
+}
+
 async function runSync(searchTerms) {
   const started = Date.now();
   const stats = newStats();
   await pullSources(sourceList(searchTerms, await db.all('SELECT ats, token, name FROM company_boards')), stats);
   // Clean-up: anything outside the US, too old, or posted by a job board when the employer's own site has it too.
   const old = await db.run(`DELETE FROM jobs WHERE (country IS DISTINCT FROM 'US' OR posted_ts IS NULL OR posted_ts < now() - make_interval(days => ?::int)) AND ${UNREFERENCED}`, MAX_AGE_DAYS);
-  const dupes = await db.run(`DELETE FROM jobs WHERE source_key IN ('remotive', 'remoteok', 'themuse', 'adzuna', 'jsearch', 'usajobs') AND ${UNREFERENCED}
-    AND EXISTS (SELECT 1 FROM jobs b WHERE b.id <> jobs.id AND b.source_key ~ '^(greenhouse|lever|ashby|workday|smartrecruiters|workable|amazon)' AND lower(b.company) = lower(jobs.company) AND lower(b.title) = lower(jobs.title))`);
-  stats.removed += old.count + dupes.count;
+  const dupes = await removeDuplicates();
+  stats.removed += old.count + dupes;
+  stats.duplicates = dupes;
   const { c: total } = await db.get("SELECT COUNT(*) AS c FROM jobs WHERE country = 'US'");
   lastSync = { ...stats, total, at: new Date().toISOString(), seconds: Math.round((Date.now() - started) / 1000) };
   return lastSync;

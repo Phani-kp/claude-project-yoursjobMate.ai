@@ -213,7 +213,7 @@ export async function applySavedJobs(userId) {
 
 /** Background loop: refresh jobs periodically and run the agent for every user with auto-apply on. */
 const agentLoops = new WeakMap();
-export function startAgent({ intervalMs = 60_000, syncEveryMs = process.env.SYNC_EVERY_MS === undefined || process.env.SYNC_EVERY_MS === '' ? 60 * 60_000 : Number(process.env.SYNC_EVERY_MS) } = {}) {
+export function startAgent({ intervalMs = 60_000, syncEveryMs = process.env.SYNC_EVERY_MS === undefined || process.env.SYNC_EVERY_MS === '' ? 15 * 60_000 : Number(process.env.SYNC_EVERY_MS) } = {}) {
   let lastSync = 0;
   const state = { stopping: false, active: new Set() };
   const runTick = async () => {

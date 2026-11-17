@@ -10,6 +10,8 @@
  *  - Adding them below.
  * Workday tokens are "tenant|wdN|site", from https://<tenant>.<wdN>.myworkdayjobs.com/<site>.
  */
+import { MORE_COMPANY_BOARDS } from './moreCompanies.js';
+
 export const COMPANY_BOARDS = {
   greenhouse: {
     airbnb: 'Airbnb', stripe: 'Stripe', figma: 'Figma', discord: 'Discord', robinhood: 'Robinhood', coinbase: 'Coinbase',
@@ -81,9 +83,18 @@ export const COMPANY_BOARDS = {
 
 export const ATS_LABELS = { greenhouse: 'Greenhouse', lever: 'Lever', ashby: 'Ashby', smartrecruiters: 'SmartRecruiters', workday: 'Workday', workable: 'Workable' };
 
-/** Built-in boards plus EXTRA_COMPANY_BOARDS, as { ats, token, name }. */
+/** Built-in boards, the verified list in moreCompanies.js, plus EXTRA_COMPANY_BOARDS, as { ats, token, name }. */
 export function builtInBoards() {
   const boards = Object.entries(COMPANY_BOARDS).flatMap(([ats, list]) => Object.entries(list).map(([token, name]) => ({ ats, token, name })));
+  // A company already listed above keeps its hand-checked board; the generated list only adds new companies.
+  const names = new Set(boards.map((b) => b.name.toLowerCase()));
+  for (const [ats, list] of Object.entries(MORE_COMPANY_BOARDS)) {
+    for (const [token, name] of Object.entries(list)) {
+      if (!ATS_LABELS[ats] || names.has(name.toLowerCase()) || boards.some((b) => b.ats === ats && b.token === token)) continue;
+      names.add(name.toLowerCase());
+      boards.push({ ats, token, name });
+    }
+  }
   for (const entry of (process.env.EXTRA_COMPANY_BOARDS || '').split(',').map((s) => s.trim()).filter(Boolean)) {
     const [ats, token, ...name] = entry.split(':');
     if (ATS_LABELS[ats] && token && !boards.some((b) => b.ats === ats && b.token === token)) boards.push({ ats, token, name: name.join(':') || token });

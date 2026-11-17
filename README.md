@@ -261,7 +261,7 @@ Before running several app instances, use a shared rate-limit store, coordinate 
 
 ## Keeping jobs fresh 24/7
 
-The web server refreshes jobs every hour while it runs. To refresh them around the clock, even while your computer or server is off, use the included GitHub Action:
+The web server refreshes jobs from the company career sites every 15 minutes while it runs (`SYNC_EVERY_MS`). Adzuna, USAJOBS and JSearch refresh every 6 hours (`API_SYNC_EVERY_MS`), because their free plans cap requests. To refresh them around the clock, even while your computer or server is off, use the included GitHub Action:
 
 1. Push this repository to GitHub.
 2. In the repository, open **Settings → Secrets and variables → Actions → New repository secret**. Name it `DATABASE_URL` and paste the same connection string as in `server/.env`. Optionally add `ADZUNA_APP_ID`, `ADZUNA_APP_KEY`, `USAJOBS_API_KEY`, `USAJOBS_EMAIL` and `JSEARCH_API_KEY`.
